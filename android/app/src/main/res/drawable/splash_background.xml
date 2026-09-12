@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- V6B 启动屏底色：3 段线性渐变（与图标同色）+ 顶部柔和光晕 -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- 底层：斜向三段绿渐变，方向与图标一致（左上 → 右下） -->
+    <item>
+        <shape android:shape="rectangle">
+            <gradient
+                android:type="linear"
+                android:angle="315"
+                android:startColor="#2D5A3D"
+                android:centerColor="#4D7D60"
+                android:endColor="#3A6849" />
+        </shape>
+    </item>
+
+    <!-- 上层：顶部中央的浅绿光晕，边缘完全透明，避免出现硬边 -->
+    <item>
+        <shape android:shape="rectangle">
+            <gradient
+                android:type="radial"
+                android:centerX="0.5"
+                android:centerY="0.16"
+                android:gradientRadius="460"
+                android:startColor="#66DCF0C8"
+                android:endColor="#00DCF0C8" />
+        </shape>
+    </item>
+
+</layer-list>

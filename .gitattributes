@@ -1,0 +1,24 @@
+# 换行符统一：默认交给 git 判断，文本文件统一 LF
+* text=auto
+
+# 脚本：跨平台执行要求固定
+*.sh     text eol=lf
+gradlew  text eol=lf
+*.bat    text eol=crlf
+*.cmd    text eol=crlf
+
+# 二进制：不做任何换行/合并处理
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.webp   binary
+*.ico    binary
+*.ttf    binary
+*.otf    binary
+*.jar    binary
+*.keystore binary
+*.jks    binary
+
+# 语言统计：不把生成物算进仓库语言占比
+package-lock.json linguist-generated=true

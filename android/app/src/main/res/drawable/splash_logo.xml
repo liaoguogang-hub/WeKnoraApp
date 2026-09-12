@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- V6 图形：两个错位圆角方框（粗 + 细描边），与图标前景完全一致，仅整体放大到 216dp -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="216dp"
+    android:height="216dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:pathData="M45,44 L64,44 A7,7 0 0 1 71,51 L71,63 A7,7 0 0 1 64,70 L45,70 A7,7 0 0 1 38,63 L38,51 A7,7 0 0 1 45,44 Z"
+        android:strokeColor="#F8F7FC"
+        android:strokeWidth="7.2"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:pathData="M55,34 L67,34 A7,7 0 0 1 74,41 L74,53 A7,7 0 0 1 67,60 L55,60 A7,7 0 0 1 48,53 L48,41 A7,7 0 0 1 55,34 Z"
+        android:strokeColor="#F8F7FC"
+        android:strokeWidth="3.2"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+</vector>

@@ -1,0 +1,383 @@
+/**
+ * 端侧 Rerank 引擎 — 复刻 leoliao-app V36.2 的实现
+ *
+ * 设计目标：在 KB 检索结果上做二次精排，提升 RAG 准确率
+ *
+ * 三档降级（永不抛出）：
+ *   Level 1: Cross-encoder（@xenova/transformers，模型 Xenova/ms-marco-MiniLM-L-6-v2）
+ *   Level 2: 轻量 BM25 重打分（零依赖，中英文混合支持）
+ *   Level 3: 直接返回原数组
+ *
+ * 性能预算：
+ *   Level 1: 50 候选 × ~30ms ≈ 1.5s（3s 超时降级）
+ *   Level 2: 50 候选 × <1ms ≈ <50ms
+ *
+ * LRU 缓存：100 条 / 30 分钟过期
+ */
+
+// === 输入输出类型（与 WeKnora 客户端保持解耦） ===
+export interface RerankCandidate {
+  id: string;             // chunk id
+  knowledge_id?: string;
+  knowledge_title?: string;
+  content: string;        // chunk 文本
+  score: number;          // 原始相似度分数（向后兼容）
+}
+
+export interface RerankOptions {
+  topN?: number;          // 截断 top N
+  timeoutMs?: number;     // L1 超时（默认 3000）
+  forceFallback?: boolean;// 强制 L2
+  normalize?: boolean;     // 分数归一化（默认 true）
+  skipCache?: boolean;     // 跳过缓存（调试用）
+}
+
+export interface RerankStats {
+  level: 'cross-encoder' | 'bm25-rescore' | 'passthrough';
+  durationMs: number;
+  inputCount: number;
+  outputCount: number;
+  timedOut: boolean;
+  cacheHit?: boolean;
+}
+
+// === 权重常量集中 ===
+const RERANK_WEIGHTS = {
+  titleHit: 3.0,
+  headingHit: 2.0,
+  contentTf: 1.0,
+  phraseBonus: 1.5,
+  shortChunkPenalty: 0.8,
+  shortChunkThreshold: 50,
+} as const;
+
+// === LRU 缓存 ===
+interface CacheEntry {
+  results: RerankCandidate[];
+  ts: number;
+}
+
+const CACHE_MAX_SIZE = 100;
+const CACHE_TTL_MS = 30 * 60 * 1000;
+
+class LRUCache {
+  private map = new Map<string, CacheEntry>();
+  private stats = { hits: 0, misses: 0, evictions: 0 };
+
+  private hash(s: string): string {
+    let h = 5381;
+    for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+    return (h >>> 0).toString(36);
+  }
+
+  makeKey(query: string, results: RerankCandidate[], opts: RerankOptions): string {
+    const resultSig = results
+      .slice(0, 50)
+      .map((r) => `${r.id}:${r.content.length}`)
+      .join('|');
+    const optsSig = JSON.stringify({
+      topN: opts.topN ?? -1,
+      timeoutMs: opts.timeoutMs ?? -1,
+      forceFallback: !!opts.forceFallback,
+      normalize: opts.normalize ?? true,
+    });
+    return this.hash(query + '||' + resultSig + '||' + optsSig);
+  }
+
+  get(key: string): RerankCandidate[] | null {
+    const entry = this.map.get(key);
+    if (!entry) {
+      this.stats.misses++;
+      return null;
+    }
+    if (Date.now() - entry.ts > CACHE_TTL_MS) {
+      this.map.delete(key);
+      this.stats.misses++;
+      return null;
+    }
+    this.map.delete(key);
+    this.map.set(key, entry);
+    this.stats.hits++;
+    return entry.results;
+  }
+
+  set(key: string, results: RerankCandidate[]): void {
+    if (this.map.has(key)) this.map.delete(key);
+    this.map.set(key, { results, ts: Date.now() });
+    while (this.map.size > CACHE_MAX_SIZE) {
+      const firstKey = this.map.keys().next().value;
+      if (!firstKey) break;
+      this.map.delete(firstKey);
+      this.stats.evictions++;
+    }
+  }
+
+  getStats() {
+    const total = this.stats.hits + this.stats.misses;
+    return {
+      size: this.map.size,
+      hits: this.stats.hits,
+      misses: this.stats.misses,
+      hitRate: total === 0 ? 0 : this.stats.hits / total,
+      evictions: this.stats.evictions,
+    };
+  }
+
+  clear() {
+    this.map.clear();
+  }
+}
+
+const _cache = new LRUCache();
+export function getCacheStats() {
+  return _cache.getStats();
+}
+export function clearRerankCache() {
+  _cache.clear();
+}
+
+// === Level 1: Cross-encoder（懒加载 @xenova/transformers） ===
+
+type CrossEncoderFn = (
+  query: string,
+  docs: string[],
+  options?: { topk?: number }
+) => Promise<Array<{ score: number; index: number }>>;
+
+let _crossEncoderPromise: Promise<CrossEncoderFn | null> | null = null;
+
+async function loadCrossEncoder(): Promise<CrossEncoderFn | null> {
+  if (_crossEncoderPromise) return _crossEncoderPromise;
+
+  _crossEncoderPromise = (async () => {
+    try {
+      const tf = await import('@xenova/transformers').catch(() => null);
+      if (!tf) {
+        console.warn('[reranker] @xenova/transformers not available');
+        return null;
+      }
+      const { pipeline, env } = tf as any;
+      env.allowLocalModels = true;
+      env.useFS = undefined;
+
+      const pipe: any = await pipeline(
+        'text-classification',
+        'Xenova/ms-marco-MiniLM-L-6-v2',
+        { quantized: true }
+      );
+      console.log('[reranker] cross-encoder loaded');
+      return async (query: string, docs: string[], options) => {
+        const inputs = docs.map((d) => `${query} [SEP] ${d.slice(0, 512)}`);
+        const outputs = await pipe(inputs, { topk: 1 });
+        const scored = outputs.map((out: any, idx: number) => {
+          const score = Array.isArray(out) ? (out[0]?.score ?? 0) : (out?.score ?? 0);
+          return { score, index: idx };
+        });
+        scored.sort((a: any, b: any) => b.score - a.score);
+        return options?.topk ? scored.slice(0, options.topk) : scored;
+      };
+    } catch (e) {
+      console.warn('[reranker] cross-encoder load failed, will use Level 2:', e);
+      return null;
+    }
+  })();
+
+  return _crossEncoderPromise;
+}
+
+// === Level 2: BM25 重打分（零依赖，中英文） ===
+
+const STOP_WORDS = new Set([
+  '的', '了', '是', '在', '和', '与', '或', '及', '等', '为', '我', '你', '他', '她', '它',
+  '这', '那', '有', '没', '不', '也', '都', '就', '要', '会', '能', '把', '被', '对', '从',
+  'a', 'an', 'the', 'is', 'are', 'was', 'were', 'be', 'been', 'and', 'or', 'but',
+  'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'as', 'this', 'that', 'these',
+  'those', 'it', 'its', 'i', 'you', 'he', 'she', 'we', 'they',
+]);
+
+function tokenizeBM25(text: string): string[] {
+  if (!text) return [];
+  const out: string[] = [];
+  const enMatches = text.toLowerCase().match(/[a-z0-9_]+/g);
+  if (enMatches) {
+    for (const m of enMatches) {
+      if (m.length > 1 && !STOP_WORDS.has(m)) out.push(m);
+    }
+  }
+  const cnChars = text.match(/[一-鿿]+/g);
+  if (cnChars) {
+    for (const seg of cnChars) {
+      const chars = [...seg];
+      for (const c of chars) {
+        if (!STOP_WORDS.has(c)) out.push(c);
+      }
+      for (let i = 0; i < chars.length - 1; i++) {
+        const bg = chars[i] + chars[i + 1];
+        if (!STOP_WORDS.has(chars[i]) && !STOP_WORDS.has(chars[i + 1])) out.push(bg);
+      }
+    }
+  }
+  return out;
+}
+
+function bm25RescoreOne(query: string, c: RerankCandidate): number {
+  const qTokens = tokenizeBM25(query);
+  if (qTokens.length === 0) return 0;
+
+  const titleLower = (c.knowledge_title || '').toLowerCase();
+  const contentLower = (c.content || '').toLowerCase();
+
+  let score = 0;
+  for (const qt of qTokens) {
+    if (titleLower.includes(qt)) {
+      score += RERANK_WEIGHTS.titleHit;
+    }
+    const tf = contentLower.split(qt).length - 1;
+    if (tf > 0) {
+      const norm = (tf * (1.5 + 1)) / (tf + 1.5 * (1 - 0.75 + 0.75 * 1));
+      score += norm * RERANK_WEIGHTS.contentTf;
+    }
+  }
+
+  const qPhrase = qTokens.join('');
+  if (qPhrase.length >= 4 && contentLower.includes(qPhrase)) {
+    score += RERANK_WEIGHTS.phraseBonus;
+  }
+
+  if (c.content.length < RERANK_WEIGHTS.shortChunkThreshold) {
+    score *= RERANK_WEIGHTS.shortChunkPenalty;
+  }
+  return score;
+}
+
+function normalizeScores(arr: RerankCandidate[], newScores: number[]): RerankCandidate[] {
+  const max = Math.max(...newScores, 0.0001);
+  return arr.map((r, i) => ({ ...r, score: newScores[i] / max }));
+}
+
+// === 主入口 ===
+
+export async function rerank(
+  query: string,
+  results: RerankCandidate[],
+  opts: RerankOptions = {}
+): Promise<{ results: RerankCandidate[]; stats: RerankStats }> {
+  const start = performance.now();
+  const topN = opts.topN ?? results.length;
+  const timeoutMs = opts.timeoutMs ?? 3000;
+  const normalize = opts.normalize ?? true;
+
+  if (!results || results.length === 0 || !query.trim()) {
+    return {
+      results,
+      stats: { level: 'passthrough', durationMs: 0, inputCount: 0, outputCount: 0, timedOut: false },
+    };
+  }
+
+  // LRU 缓存
+  if (!opts.skipCache) {
+    const cacheKey = _cache.makeKey(query, results, opts);
+    const cached = _cache.get(cacheKey);
+    if (cached) {
+      return {
+        results: cached,
+        stats: {
+          level: 'bm25-rescore', // 缓存命中不区分级别
+          durationMs: Math.round(performance.now() - start),
+          inputCount: results.length,
+          outputCount: cached.length,
+          timedOut: false,
+          cacheHit: true,
+        },
+      };
+    }
+  }
+
+  // Level 1: Cross-encoder
+  if (!opts.forceFallback) {
+    try {
+      const ce = await Promise.race([
+        loadCrossEncoder(),
+        new Promise<null>((_, rej) => setTimeout(() => rej(new Error('load timeout')), timeoutMs)),
+      ]);
+      if (ce) {
+        const docs = results.map((r) => r.content);
+        const scored = await Promise.race([
+          ce(query, docs, { topk: topN }),
+          new Promise<never>((_, rej) => setTimeout(() => rej(new Error('inference timeout')), timeoutMs)),
+        ]);
+        const out: RerankCandidate[] = [];
+        for (const s of scored) {
+          out.push({ ...results[s.index], score: s.score });
+        }
+        const finalResults = normalize ? normalizeScores(out, out.map((r) => r.score)) : out;
+        if (!opts.skipCache) {
+          _cache.set(_cache.makeKey(query, results, opts), finalResults);
+        }
+        return {
+          results: finalResults,
+          stats: {
+            level: 'cross-encoder',
+            durationMs: Math.round(performance.now() - start),
+            inputCount: results.length,
+            outputCount: finalResults.length,
+            timedOut: false,
+          },
+        };
+      }
+    } catch (e) {
+      console.warn(`[reranker] Level 1 failed (${(e as Error).message}), falling back to Level 2`);
+    }
+  }
+
+  // Level 2: BM25
+  try {
+    const scores = results.map((r) => bm25RescoreOne(query, r));
+    const indexed = results.map((r, i) => ({ r, s: scores[i] }));
+    indexed.sort((a, b) => b.s - a.s);
+    const sliced = indexed.slice(0, topN).map((x) => x.r);
+    const finalResults = normalize
+      ? normalizeScores(sliced, sliced.map((_, i) => indexed[i].s))
+      : sliced;
+    if (!opts.skipCache) {
+      _cache.set(_cache.makeKey(query, results, opts), finalResults);
+    }
+    return {
+      results: finalResults,
+      stats: {
+        level: 'bm25-rescore',
+        durationMs: Math.round(performance.now() - start),
+        inputCount: results.length,
+        outputCount: finalResults.length,
+        timedOut: false,
+      },
+    };
+  } catch (e) {
+    console.warn('[reranker] Level 2 failed, returning passthrough:', e);
+    return {
+      results: results.slice(0, topN),
+      stats: {
+        level: 'passthrough',
+        durationMs: Math.round(performance.now() - start),
+        inputCount: results.length,
+        outputCount: Math.min(topN, results.length),
+        timedOut: false,
+      },
+    };
+  }
+}
+
+/**
+ * 仅检查 cross-encoder 是否可用（UI 显示用）
+ */
+export async function getRerankerStatus(): Promise<{ crossEncoderAvailable: boolean }> {
+  try {
+    const ce = await Promise.race([
+      loadCrossEncoder(),
+      new Promise<null>((_, rej) => setTimeout(() => rej(new Error('timeout')), 500)),
+    ]);
+    return { crossEncoderAvailable: !!ce };
+  } catch {
+    return { crossEncoderAvailable: false };
+  }
+}

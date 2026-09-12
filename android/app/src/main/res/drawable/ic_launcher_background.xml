@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- V6B 绿底：3 段线性渐变 + 顶部光晕 + 纸纹 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:pathData="M0,0h108v108h-108z">
+        <aapt:attr xmlns:aapt="http://schemas.android.com/aapt" name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="0" android:startY="0"
+                android:endX="108" android:endY="108">
+                <item android:offset="0"    android:color="#2D5A3D"/>
+                <item android:offset="0.5"  android:color="#4D7D60"/>
+                <item android:offset="0.85" android:color="#3A6849"/>
+            </gradient>
+        </aapt:attr>
+    </path>
+    <!-- 顶部光晕（用半透明绿色椭圆） -->
+    <path android:pathData="M 22,5 a 40,30 0 0 1 80,0 a 40,30 0 0 1 -80,0 z"
+        android:fillColor="#80DCF0C8"/>
+    <!-- 细线纤维 -->
+    <path android:pathData="M 20,32 L 25,30" android:strokeColor="#33000000" android:strokeWidth="0.5"/>
+    <path android:pathData="M 70,25 L 78,30" android:strokeColor="#33000000" android:strokeWidth="0.5"/>
+    <path android:pathData="M 35,75 L 45,80" android:strokeColor="#33000000" android:strokeWidth="0.5"/>
+    <path android:pathData="M 75,70 L 82,75" android:strokeColor="#33000000" android:strokeWidth="0.5"/>
+</vector>

@@ -1,0 +1,331 @@
+/**
+ * WeKnoraApp 主入口 v2
+ *
+ * 设计：
+ *  - 顶部 topbar (菜单按钮 + Agent 选择器 + 标题)
+ *  - 抽屉式左侧导航 (Sessions 列表)
+ *  - 主内容区（Chat / Agents / KBs / Settings）
+ *  - 弹窗式 Settings（在主内容区切换）
+ *
+ * 借鉴：ChatGPT iOS / LobeChat / Obsidian Mobile
+ */
+
+import { LitElement, html, css, nothing } from 'lit';
+import { customElement, state } from 'lit/decorators.js';
+import './components/sidebar';
+import './components/chat-page';
+import './components/settings-page';
+import './components/agents-page';
+import './components/knowledge-page';
+import './components/agent-selector';
+import { isConfigured, createSession } from './lib/weknora-client';
+import { loadTheme, applyTheme } from './lib/theme';
+
+type Page = 'chat' | 'agents' | 'kb' | 'settings';
+
+@customElement('ll-app')
+export class LlApp extends LitElement {
+  /** Light DOM —— 使用全局 styles.css（同 leoliao-app） */
+  protected createRenderRoot() { return this; }
+
+  static UNUSED_styles = css`
+    :host { display: block; height: 100vh; height: 100dvh; }
+    .app-shell {
+      display: flex; flex-direction: column;
+      height: 100%;
+      background: var(--bg);
+      position: relative;
+      overflow: hidden;
+    }
+    .topbar {
+      display: flex;
+      align-items: center;
+      gap: var(--s-3);
+      padding: 10px var(--s-4);
+      background: var(--overlay);
+      backdrop-filter: blur(20px) saturate(180%);
+      -webkit-backdrop-filter: blur(20px) saturate(180%);
+      border-bottom: 1px solid var(--border);
+      z-index: 10;
+      flex-shrink: 0;
+      padding-top: max(10px, env(safe-area-inset-top));
+    }
+    .menu-btn {
+      width: 36px; height: 36px;
+      display: flex; align-items: center; justify-content: center;
+      background: transparent;
+      border: none;
+      color: var(--fg);
+      font-size: 18px;
+      border-radius: var(--r-md);
+      cursor: pointer;
+    }
+    .menu-btn:hover { background: var(--bg-2); }
+    .topbar-title {
+      font-size: 17px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      flex: 1;
+      text-align: center;
+    }
+    .topbar-actions { display: flex; gap: 4px; align-items: center; }
+    .icon-btn {
+      width: 36px; height: 36px;
+      display: inline-flex; align-items: center; justify-content: center;
+      background: transparent;
+      border: none;
+      color: var(--fg-2);
+      border-radius: var(--r-md);
+      cursor: pointer;
+      font-size: 18px;
+      transition: background 0.15s var(--ease-quick);
+    }
+    .icon-btn:hover { background: var(--bg-2); color: var(--fg); }
+    .main-content { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+    .drawer-overlay {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.4);
+      z-index: 50;
+      animation: fadeIn 0.2s ease;
+    }
+    .drawer {
+      position: fixed; top: 0; left: 0; bottom: 0;
+      width: 86%; max-width: 320px;
+      background: var(--overlay);
+      backdrop-filter: blur(30px) saturate(180%);
+      -webkit-backdrop-filter: blur(30px) saturate(180%);
+      border-right: 1px solid var(--border);
+      z-index: 51;
+      display: flex; flex-direction: column;
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: env(safe-area-inset-bottom);
+      animation: slideInLeft 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+    @keyframes slideInLeft {
+      from { transform: translateX(-100%); }
+      to { transform: translateX(0); }
+    }
+    .welcome {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: var(--s-6);
+      text-align: center;
+    }
+    .welcome-card {
+      max-width: 360px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--r-lg);
+      padding: var(--s-7);
+      box-shadow: var(--shadow);
+    }
+    .welcome h2 {
+      margin: 0 0 var(--s-3);
+      font-size: 22px;
+      letter-spacing: -0.02em;
+    }
+    .welcome p {
+      color: var(--fg-2);
+      margin: 0 0 var(--s-5);
+      line-height: 1.6;
+    }
+    .welcome-actions { display: flex; flex-direction: column; gap: var(--s-2); }
+  `;
+
+  @state() private drawerOpen = false;
+  @state() private page: Page = 'chat';
+  @state() private sessionId = '';
+  @state() private configured = isConfigured();
+  private _creating = false;
+
+  connectedCallback() {
+    super.connectedCallback();
+    this.applyStoredTheme();
+    window.addEventListener('storage', () => this.configured = isConfigured());
+    // Settings 保存后：刷新配置状态；若已配置则回到 Chat
+    this.addEventListener('settings-saved', () => {
+      this.configured = isConfigured();
+      if (this.configured) this.openPage('chat');
+    });
+    // ✅ 恢复上次会话（不再每次启动都新建）
+    if (this.configured) {
+      this.restoreLastSession();
+    }
+  }
+
+  /** 恢复上次打开的会话 */
+  private async restoreLastSession() {
+    const last = localStorage.getItem('weknora-last-session');
+    if (!last) return; // 从没进过会话 → 交给 ensureSession 建新的
+    try {
+      this.sessionId = last;
+      console.log('[app] restored last session', last);
+    } catch (e) {
+      console.warn('[app] restore last session failed', e);
+    }
+  }
+
+  /** 记住当前会话 */
+  private rememberSession(id: string) {
+    if (id) localStorage.setItem('weknora-last-session', id);
+  }
+
+  private applyStoredTheme() {
+    const t = loadTheme();
+    applyTheme(t);
+  }
+
+  private toggleDrawer() {
+    this.drawerOpen = !this.drawerOpen;
+  }
+
+  private closeDrawer() {
+    this.drawerOpen = false;
+  }
+
+  private openPage(p: Page) {
+    this.page = p;
+    // 从其它页返回 Chat 时，优先回到上次会话
+    if (p === 'chat') {
+      const last = localStorage.getItem('weknora-last-session');
+      this.sessionId = last || '';
+    } else {
+      this.sessionId = '';
+    }
+    this.drawerOpen = false;
+    if (p === 'chat' && this.configured && !this.sessionId) {
+      this.ensureSession();
+    }
+  }
+
+  /** 进入 Chat 页但没有会话时，自动建一个，避免空白 */
+  private async ensureSession() {
+    if (this.sessionId || this._creating) return;
+    this._creating = true;
+    try {
+      const s = await createSession(null);
+      if (s?.id && this.page === 'chat' && !this.sessionId) {
+        this.sessionId = s.id;
+        this.rememberSession(s.id);
+      }
+    } catch (e) {
+      console.warn('[app] ensureSession failed:', e);
+    } finally {
+      this._creating = false;
+    }
+  }
+
+  private handleOpenChat(e: CustomEvent) {
+    this.sessionId = e.detail.sessionId;
+    this.rememberSession(e.detail.sessionId);
+    this.page = 'chat';
+    this.drawerOpen = false;
+  }
+
+  /** 左上角返回：只打开会话抽屉，不销毁当前会话（消息保持可见） */
+  private handleBackToSessions() {
+    this.drawerOpen = true;
+  }
+
+  /** 侧边栏「新会话」→ 建会话并进入 */
+  private async handleNewChat() {
+    try {
+      const s = await createSession(null);
+      if (s?.id) this.handleOpenChat(new CustomEvent('open-chat', { detail: { sessionId: s.id } }));
+    } catch (e) {
+      console.warn('[app] new chat failed:', e);
+    }
+  }
+
+  private renderTopbar() {
+    const title = this.sessionId ? '' : this.pageTitle();
+    return html`
+      <div class="topbar">
+        <button class="menu-btn" @click=${() => this.toggleDrawer()}>☰</button>
+        ${title ? html`<div class="topbar-title">${title}</div>` : html`<div class="topbar-title"></div>`}
+        <div class="topbar-actions">
+          ${!this.sessionId && this.page === 'chat' ? html`
+            <ll-agent-selector></ll-agent-selector>
+          ` : nothing}
+          ${!this.sessionId && this.page !== 'chat' ? html`
+            <button class="icon-btn" @click=${() => this.openPage('chat')} title="返回 Chat">✕</button>
+          ` : nothing}
+        </div>
+      </div>
+    `;
+  }
+
+  private pageTitle(): string {
+    switch (this.page) {
+      case 'chat': return '';
+      case 'agents': return 'Agent 管理';
+      case 'kb': return '知识库';
+      case 'settings': return '设置';
+    }
+  }
+
+  private renderDrawer() {
+    if (!this.drawerOpen) return nothing;
+    return html`
+      <div class="drawer-overlay" @click=${() => this.closeDrawer()}></div>
+      <div class="drawer">
+        <ll-sidebar
+          .open=${this.drawerOpen}
+          @open-chat=${(e: CustomEvent) => this.handleOpenChat(e)}
+          @open-page=${(e: CustomEvent) => this.openPage(e.detail.page)}
+        ></ll-sidebar>
+      </div>
+    `;
+  }
+
+  private renderContent() {
+    if (this.sessionId) {
+      return html`<ll-chat-page .sessionId=${this.sessionId} @back=${() => this.handleBackToSessions()}></ll-chat-page>`;
+    }
+    switch (this.page) {
+      case 'chat':
+        if (!this.configured) return this.renderWelcome();
+        // 已有配置但还没会话 → 自动建一个中
+        this.ensureSession();
+        return html`
+          <div class="empty" style="min-height: calc(100dvh - 180px);">
+            <div class="loading-pulse"><span></span><span></span><span></span></div>
+            <div style="font-size:13px;">正在准备新会话…</div>
+          </div>
+        `;
+      case 'agents':
+        return html`<ll-agents-page></ll-agents-page>`;
+      case 'kb':
+        return html`<ll-knowledge-page></ll-knowledge-page>`;
+      case 'settings':
+        return html`<ll-settings-page></ll-settings-page>`;
+    }
+  }
+
+  private renderWelcome() {
+    return html`
+      <div class="welcome">
+        <div class="welcome-card">
+          <h2>👋 欢迎使用 WeKnora</h2>
+          <p>配置 WeKnora 后端地址和 API Key 后即可开始对话。<br>支持 RAG 检索、Agent 推理、联网搜索。</p>
+          <div class="welcome-actions">
+            <button class="btn primary" @click=${() => this.openPage('settings')}>前往设置</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  render() {
+    return html`
+      <div class="app-shell">
+        ${this.renderTopbar()}
+        <div class="main-content">${this.renderContent()}</div>
+        ${this.renderDrawer()}
+      </div>
+    `;
+  }
+}

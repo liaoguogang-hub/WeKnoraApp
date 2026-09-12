@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">WeKnora</string>
+    <string name="title_activity_main">WeKnora</string>
+    <string name="package_name">com.weknora.app</string>
+    <string name="custom_url_scheme">com.weknora.app</string>
+</resources>

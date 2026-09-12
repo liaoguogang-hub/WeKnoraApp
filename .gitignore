@@ -1,0 +1,35 @@
+# ---- 依赖与构建产物 ----
+node_modules/
+dist/
+*.log
+
+# ---- Android 构建产物 ----
+# （android/.gitignore 里已有 Android 官方模板，这里做双保险）
+android/.gradle/
+android/build/
+android/app/build/
+android/app/release/
+android/local.properties
+android/**/build/
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# ---- 签名与密钥：绝不入库 ----
+*.jks
+*.keystore
+*.p12
+google-services.json
+android/app/google-services.json
+
+# ---- IDE ----
+.idea/
+*.iml
+.vscode/
+.DS_Store
+Thumbs.db
+
+# ---- 临时/调试产物 ----
+*.bak
+*.tmp

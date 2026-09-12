@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- V6B 绿色森林：启动屏 / 系统启动画面底色 -->
+    <color name="splash_background">#2D5A3D</color>
+</resources>
