@@ -156,6 +156,56 @@ adb shell "cat /data/local/tmp/backup.tar | run-as com.weknora.app tar xf -"
 | `GET /api/v1/knowledge-bases` | KB 列表 |
 | `POST /api/v1/knowledge-bases/{id}/knowledge/url` | URL 导入 |
 
+## 🔀 版本管理与发布
+
+仓库：<https://github.com/liaoguogang-hub/WeKnoraApp>（public，默认分支 `main`）
+
+### ⚠️ 推送必须走 443 端口
+
+本机 **22 端口被拒绝**（`git@github.com:22` → Connection refused），
+`ssh.github.com:443` 才通。这与 `leoliao-app` 用的是同一套规避方案：
+
+```powershell
+git remote add origin git@ssh.github.com:liaoguogang-hub/WeKnoraApp.git
+```
+
+### 日常提交
+
+```powershell
+git add -A
+git commit -m "fix(chat): 描述改动"
+git push
+```
+
+提交信息用 `<type>(<scope>): <描述>` 形式，`type` 取
+`feat` / `fix` / `docs` / `refactor` / `chore`。
+
+### 发版
+
+版本号在三处保持一致（`CHANGELOG.md` 为唯一事实来源）：
+
+| 位置 | 字段 |
+|---|---|
+| `package.json` | `version` |
+| `android/app/build.gradle` | `versionName`（`versionCode` 每次 +1） |
+| `CHANGELOG.md` | 新增版本小节 |
+
+```powershell
+# 1. 改上面三处版本号
+# 2. 提交并打标签
+git commit -am "v0.2.1: 一句话说明"
+git tag -a v0.2.1 -m "v0.2.1: 一句话说明"
+git push && git push origin v0.2.1
+```
+
+### 注意事项
+
+- **签名文件、`google-services.json`、`local.properties` 已在 `.gitignore` 里，绝不入库。**
+- 密钥只存在 App 的 localStorage（`weknora-settings`），代码里没有任何硬编码凭证。
+- `android/` 下由 Capacitor 生成的内容（`capacitor-cordova-android-plugins/`、
+  `app/src/main/assets/public/`、`capacitor.config.json`）由 `android/.gitignore` 排除，
+  换机器后 `npm install && npx cap sync android` 即可重建。
+
 ## 📋 待办（V0.2）
 
 - [ ] Agent @Skill / @MCP 提及
