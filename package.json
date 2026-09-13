@@ -1,6 +1,6 @@
 {
   "name": "weknora-app",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "WeKnora Android client (Capacitor + Lit + TypeScript)",
   "private": true,
   "type": "module",
@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@capacitor/android": "^6.1.2",
+    "@capacitor/app": "^6.0.3",
     "@capacitor/core": "^6.1.2",
     "@capacitor/filesystem": "^6.0.4",
     "@capacitor/preferences": "^6.0.3",

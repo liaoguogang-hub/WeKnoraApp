@@ -3,6 +3,29 @@
 本文件记录 WeKnoraApp 的所有重要变更。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.1] — 2026-09-13
+
+### 新增
+
+- **拦截 Android 返回手势**（引入 `@capacitor/app`）。此前没有任何返回键监听，
+  左滑返回 / 返回键会直接把 Activity 切到桌面，看起来就是「App 被退了」。
+
+  返回层级（刻意避免「Chat 页开抽屉、抽屉又被返回关掉」的死循环）：
+
+  1. 非 Chat 页（设置 / 知识库 / Agent 管理）→ 回到 Chat
+  2. 抽屉是用户点 ☰ 手动打开的 → 关掉抽屉
+  3. Chat 页且抽屉关着 → 打开抽屉
+  4. 抽屉是由返回键打开的 → 进入退出流程
+
+  退出用「2 秒内再按一次」防误触，只弹提示不退出。
+
+### 修复
+
+- **左滑返回直接退出 App**。根因是缺少返回键监听；另外要注意
+  `@capacitor/app` 的 `OnBackPressedCallback` 一旦加载就**始终吞掉**返回事件，
+  没有注册 `backButton` 监听时只会 `webView.goBack()`（单页应用里等于没反应），
+  退出必须显式调 `App.exitApp()`。
+
 ## [0.2.0] — 2026-09-12
 
 ### 新增

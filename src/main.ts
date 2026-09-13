@@ -12,6 +12,7 @@
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
+import { App } from '@capacitor/app';
 import './components/sidebar';
 import './components/chat-page';
 import './components/settings-page';
@@ -139,7 +140,15 @@ export class LlApp extends LitElement {
   @state() private page: Page = 'chat';
   @state() private sessionId = '';
   @state() private configured = isConfigured();
+  @state() private toast = '';
   private _creating = false;
+
+  /** 抽屉是「返回键」打开的（而不是用户点 ☰ 打开的）—— 决定再次返回是关抽屉还是走退出 */
+  private _drawerFromBack = false;
+  /** 上次触发「再按一次退出」的时间，用于双击退出防误触 */
+  private _lastBackAt = 0;
+  private _toastTimer: any = null;
+  private _backListener: { remove: () => void } | null = null;
 
   connectedCallback() {
     super.connectedCallback();
@@ -154,6 +163,76 @@ export class LlApp extends LitElement {
     if (this.configured) {
       this.restoreLastSession();
     }
+    this.registerBackHandler();
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    this._backListener?.remove();
+    this._backListener = null;
+    clearTimeout(this._toastTimer);
+  }
+
+  /**
+   * 拦截 Android 系统返回（返回键 / 左滑返回手势）。
+   *
+   * ⚠️ 装了 @capacitor/app 之后，它的 OnBackPressedCallback 会**始终吞掉**返回事件，
+   *    没注册监听的话只是 webView.goBack()（单页应用里等于没反应），
+   *    所以退出必须显式调 App.exitApp()。
+   *
+   * 层级（避免「Chat 页开抽屉、抽屉又被返回关掉」的死循环）：
+   *   ① 非 Chat 页          → 回 Chat
+   *   ② 抽屉是手动打开的      → 关抽屉
+   *   ③ Chat 页、抽屉关着     → 打开抽屉（并记下来源=返回键）
+   *   ④ 抽屉是返回键打开的     → 进入退出流程（双击防误触）
+   */
+  private registerBackHandler() {
+    App.addListener('backButton', () => this.handleBackButton())
+      .then((h) => { this._backListener = h; })
+      .catch((e) => console.warn('[app] backButton listener failed:', e));
+  }
+
+  private handleBackButton() {
+    // ① 非 Chat 页 → 回 Chat
+    if (this.page !== 'chat') {
+      this.openPage('chat');
+      return;
+    }
+    // 未配置时抽屉里没有内容可看，直接走退出流程
+    if (!this.configured) {
+      this.confirmExit();
+      return;
+    }
+    // ② / ④ 抽屉开着
+    if (this.drawerOpen) {
+      if (this._drawerFromBack) {
+        this.confirmExit();   // 返回键打开的抽屉 → 再返回即「退出」那一步
+      } else {
+        this.closeDrawer();   // 用户点 ☰ 打开的 → 先关掉
+      }
+      return;
+    }
+    // ③ Chat 页、抽屉关着 → 打开抽屉
+    this.drawerOpen = true;
+    this._drawerFromBack = true;
+  }
+
+  /** 退出前防误触：2 秒内再按一次才真的退出 */
+  private confirmExit() {
+    const now = Date.now();
+    if (now - this._lastBackAt < 2000) {
+      this._lastBackAt = 0;
+      App.exitApp().catch((e) => console.warn('[app] exitApp failed:', e));
+      return;
+    }
+    this._lastBackAt = now;
+    this.showToast('再按一次返回键退出应用');
+  }
+
+  private showToast(msg: string) {
+    this.toast = msg;
+    clearTimeout(this._toastTimer);
+    this._toastTimer = setTimeout(() => { this.toast = ''; }, 2000);
   }
 
   /** 恢复上次打开的会话 */
@@ -180,10 +259,13 @@ export class LlApp extends LitElement {
 
   private toggleDrawer() {
     this.drawerOpen = !this.drawerOpen;
+    // 用户手动开/关 → 不再算「返回键打开的」
+    this._drawerFromBack = false;
   }
 
   private closeDrawer() {
     this.drawerOpen = false;
+    this._drawerFromBack = false;
   }
 
   private openPage(p: Page) {
@@ -196,6 +278,7 @@ export class LlApp extends LitElement {
       this.sessionId = '';
     }
     this.drawerOpen = false;
+    this._drawerFromBack = false;
     if (p === 'chat' && this.configured && !this.sessionId) {
       this.ensureSession();
     }
@@ -223,11 +306,14 @@ export class LlApp extends LitElement {
     this.rememberSession(e.detail.sessionId);
     this.page = 'chat';
     this.drawerOpen = false;
+    this._drawerFromBack = false;
   }
 
   /** 左上角返回：只打开会话抽屉，不销毁当前会话（消息保持可见） */
   private handleBackToSessions() {
     this.drawerOpen = true;
+    // 语义上等同于「返回」→ 复用系统返回键的层级，避免出现两次返回行为不一致
+    this._drawerFromBack = true;
   }
 
   /** 侧边栏「新会话」→ 建会话并进入 */
@@ -325,6 +411,7 @@ export class LlApp extends LitElement {
         ${this.renderTopbar()}
         <div class="main-content">${this.renderContent()}</div>
         ${this.renderDrawer()}
+        ${this.toast ? html`<div class="toast">${this.toast}</div>` : nothing}
       </div>
     `;
   }
