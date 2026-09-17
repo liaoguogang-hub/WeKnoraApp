@@ -3,6 +3,17 @@
 本文件记录 WeKnoraApp 的所有重要变更。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.2] — 2026-09-13
+
+### 修复
+
+- **设置页关于区域显示旧版本号 0.2.0**（v0.2.1 的 APK 里也错）。根因是
+  `settings-page.ts` 里硬编码了字符串 `"WeKnora Android Client v0.2.0"`，
+  跟 `package.json` 是两份独立维护的版本号，升版本时漏改。
+
+  现在通过 Vite 的 `define` 在构建期把 `package.json.version` 替换成 `__APP_VERSION__`
+  注入到 bundle（声明见 `src/env.d.ts`），后续升版本只改一处。
+
 ## [0.2.1] — 2026-09-13
 
 ### 新增

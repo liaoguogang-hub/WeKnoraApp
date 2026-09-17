@@ -190,6 +190,9 @@ git push
 | `android/app/build.gradle` | `versionName`（`versionCode` 每次 +1） |
 | `CHANGELOG.md` | 新增版本小节 |
 
+设置页关于区域的版本号不需要单独维护——`vite.config.ts` 在构建期把 `package.json.version`
+通过 `define` 注入成 `__APP_VERSION__`（声明见 `src/env.d.ts`），源码里直接引用即可。
+
 ```powershell
 # 1. 改上面三处版本号
 # 2. 提交并打标签

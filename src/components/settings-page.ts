@@ -195,7 +195,7 @@ export class LlSettingsPage extends LitElement {
 
         <div class="card">
           <h3 style="margin:0 0 var(--s-3);font-size:14px;font-weight:600;">ℹ️ 关于</h3>
-          <div class="muted">WeKnora Android Client v0.2.0</div>
+          <div class="muted">WeKnora Android Client v${__APP_VERSION__}</div>
           <div class="muted" style="margin-top: 4px;">Powered by Capacitor + Lit + TypeScript</div>
         </div>
       </div>
