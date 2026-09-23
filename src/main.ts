@@ -169,6 +169,18 @@ export class LlApp extends LitElement {
       const p = e.detail?.page as Page | undefined;
       if (p) this.openPage(p);
     }) as EventListener);
+    // 「设置 → 连接」切换到了另一台 WeKnora：旧会话属于旧服务器，必须清掉，
+    // 否则会拿着一台服务器的 sessionId 去请求另一台。
+    this.addEventListener('connection-changed', () => {
+      this.sessionId = '';
+      localStorage.removeItem('weknora-last-session');
+      this.configured = isConfigured();
+      this.page = 'chat';
+      this.drawerOpen = false;
+      this._drawerFromBack = false;
+      this.showToast('已切换连接');
+      if (this.configured) void this.ensureSession();
+    });
     // ✅ 恢复上次会话（不再每次启动都新建）
     if (this.configured) {
       this.restoreLastSession();

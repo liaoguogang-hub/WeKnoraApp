@@ -3,7 +3,7 @@
  * 借鉴 ChatGPT iOS / LobeChat 的左侧导航
  */
 
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state, property } from 'lit/decorators.js';
 import {
   listSessions, createSession, deleteSession, pinSession, listAgents, loadSettings,
@@ -174,6 +174,33 @@ export class LlSidebar extends LitElement {
   @state() private error = '';
   /** 只用于在会话列表里显示「这个会话用的是哪个 agent」 */
   @state() private agents: Agent[] = [];
+  /**
+   * 分组折叠状态（置顶 / 近期）。
+   *
+   * 会话一多，列表会把底部「知识库 / 设置」顶出可视区；除了让列表可滚动
+   * （见 styles.css 里 ll-sidebar .list 的修正），再给分组加折叠，
+   * 让用户能一键把列表收短。
+   */
+  @state() private collapsed: { pinned?: boolean; recent?: boolean } = (() => {
+    try { return JSON.parse(localStorage.getItem('weknora-sidebar-collapsed') || '{}') || {}; } catch { return {}; }
+  })();
+
+  private toggleSection(key: 'pinned' | 'recent') {
+    this.collapsed = { ...this.collapsed, [key]: !this.collapsed[key] };
+    try { localStorage.setItem('weknora-sidebar-collapsed', JSON.stringify(this.collapsed)); } catch { /* ignore */ }
+  }
+
+  /** 分组标题：可点击折叠，右侧显示条数 */
+  private renderSection(key: 'pinned' | 'recent', label: string, count: number) {
+    const isCollapsed = !!this.collapsed[key];
+    return html`
+      <button class="section-title section-toggle" @click=${() => this.toggleSection(key)}>
+        <span class="chev">${isCollapsed ? '▸' : '▾'}</span>
+        <span>${label}</span>
+        <span class="count">${count}</span>
+      </button>
+    `;
+  }
 
   connectedCallback() {
     super.connectedCallback();
@@ -279,12 +306,12 @@ export class LlSidebar extends LitElement {
 
         <div class="list">
           ${pinned.length > 0 ? html`
-            <div class="section-title">📌 已置顶</div>
-            ${pinned.map((s) => this.renderItem(s))}
+            ${this.renderSection('pinned', '📌 已置顶', pinned.length)}
+            ${this.collapsed.pinned ? nothing : pinned.map((s) => this.renderItem(s))}
           ` : ''}
           ${others.length > 0 ? html`
-            ${pinned.length > 0 ? html`<div class="section-title" style="padding-top: var(--s-4);">近期</div>` : html`<div class="section-title">近期</div>`}
-            ${others.map((s) => this.renderItem(s))}
+            ${this.renderSection('recent', '近期', others.length)}
+            ${this.collapsed.recent ? nothing : others.map((s) => this.renderItem(s))}
           ` : ''}
           ${!this.loading && this.sessions.length === 0 ? html`
             <div class="empty-state">还没有会话</div>

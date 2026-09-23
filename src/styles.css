@@ -1193,3 +1193,85 @@ ll-agent-selector { display: inline-block; position: relative; }
   from { opacity: 0; transform: translate(-50%, 8px); }
   to { opacity: 1; transform: translate(-50%, 0); }
 }
+
+/* ===== 侧边栏抽屉：布局修正 =====
+   ⚠️ .wrap 与 .list 原先只写在 sidebar.ts 的 UNUSED_styles 里 —— 该组件用的是
+   Light DOM，那段 shadow 样式**完全不生效**，而全局 styles.css 里又没有它们。
+   后果：会话列表没有滚动容器、会无限向下撑开，把底部的「知识库 / 设置」挤出抽屉，
+   再被 ll-sidebar 的 overflow:hidden 直接裁掉。表现就是——会话一多，底部两个入口
+   就看不见了，只能删会话才能露出来。
+   这里把缺失的规则补到全局（并限定在 ll-sidebar 内，避免 .wrap/.list 这种
+   通用类名影响别处）。 */
+ll-sidebar .wrap {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+ll-sidebar .list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  padding: 0 var(--s-2) var(--s-3);
+}
+/* 顶部与底部永远是固定高度，不被列表挤压 */
+ll-sidebar .new-chat,
+ll-sidebar .search-row,
+ll-sidebar .footer,
+ll-sidebar .error { flex-shrink: 0; }
+
+/* 分组标题：可点击折叠 */
+ll-sidebar .section-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: var(--dim);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: var(--s-3) var(--s-4) var(--s-2);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color 0.15s var(--ease-quick);
+}
+ll-sidebar .section-toggle:hover { color: var(--fg); }
+ll-sidebar .section-toggle .chev { font-size: 9px; width: 10px; display: inline-block; }
+ll-sidebar .section-toggle .count { margin-left: auto; font-weight: 500; opacity: 0.65; }
+
+/* ===== 设置页：命名连接 ===== */
+.conn-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  padding: 10px var(--s-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg-2);
+  cursor: pointer;
+  transition: all 0.15s var(--ease-quick);
+}
+.conn-row:hover { border-color: var(--fg-2); background: var(--card); }
+.conn-row.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.conn-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--dim); flex-shrink: 0;
+}
+.conn-row.active .conn-dot { background: var(--accent); box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 60%, transparent); }
+.conn-meta { flex: 1; min-width: 0; }
+.conn-name { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.conn-url { font-size: 11px; color: var(--dim); margin-top: 2px; font-family: var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.conn-actions { display: flex; gap: 4px; flex-shrink: 0; }
+.conn-badge {
+  font-size: 10px; padding: 2px 8px; border-radius: var(--r-full);
+  background: var(--accent); color: var(--accent-fg); font-weight: 600;
+}
