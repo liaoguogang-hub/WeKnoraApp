@@ -30,6 +30,21 @@
 
 ### 修复
 
+- **App 连不上 NAS（cleartext 被系统拦掉）**。`network_security_config.xml` 里的
+  `<base-config cleartextTrafficPermitted="false">` 会把**所有不在白名单里的 http 地址**
+  拦掉，而本 App 的 `baseUrl` 是用户在设置页自填的自托管地址（公网 http 域名，或
+  任意内网 IP:端口），白名单覆盖不到。表现为**立即失败（实测 8ms）**的 `Failed to fetch`。
+
+  而且 `networkSecurityConfig` 的优先级**高于** manifest 里的
+  `android:usesCleartextTraffic="true"`，后者形同虚设。
+
+  诊断特征很好认：**`http` 全挂、`https` 正常、`http://localhost` 正常**。
+  （另外 `<domain>` 不支持网段 —— 写 `192.168.0.0` 只匹配字面量主机，不代表
+  `192.168.0.0/24`，所以「放行任意内网地址」用白名单表达不出来。）
+
+  现在改为 `base-config cleartextTrafficPermitted="true"`：自托管客户端的地址无法
+  预先枚举，只能整体允许 cleartext；HTTPS 不受影响（系统证书照旧）。
+
 - **Rerank 从未执行过（关键）**。`maybeRerankInPlace` 用
   `snapshot.references.slice(prev.references.length)` 取「本回合新增的引用」，
   但 `snapshot` 是对 `prev` 的**浅拷贝**，两者 `references` 是同一个数组，
