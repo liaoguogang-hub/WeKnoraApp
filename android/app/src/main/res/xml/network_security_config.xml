@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  网络安全配置:允许 cleartext 到内网白名单 + HTTPS 到任意域(包括 minimaxi.com)
+  修复 Capacitor WebView 的 "Failed to fetch" 错
+-->
+<network-security-config>
+    <!-- 1. 内网 cleartext(自托管 WeKnora + 模拟器宿主) -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">localhost</domain>
+        <domain includeSubdomains="true">127.0.0.1</domain>
+        <domain includeSubdomains="true">10.0.2.2</domain>
+        <domain includeSubdomains="true">192.168.0.0</domain>
+        <domain includeSubdomains="true">192.168.1.0</domain>
+        <domain includeSubdomains="true">192.168.31.0</domain>
+        <domain includeSubdomains="true">10.0.0.0</domain>
+    </domain-config>
+
+    <!-- 2. HTTPS 默认允许(API.minimaxi.com / DeepSeek / OpenAI 等) -->
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
