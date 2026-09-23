@@ -30,6 +30,11 @@ android/app/google-services.json
 .DS_Store
 Thumbs.db
 
+# ---- 端侧模型大文件（约 32MB，随 APK 打包但不进 git）----
+# 由 npm run fetch-model 补齐（已接入 npm run build，幂等）
+public/models/
+public/ort/
+
 # ---- 临时/调试产物 ----
 *.bak
 *.tmp

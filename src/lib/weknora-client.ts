@@ -319,6 +319,16 @@ export interface StreamHandle {
   cancel: () => void;
 }
 
+/** 流结束时的真实情况 —— 交给调用方判断「这次到底算不算完整」 */
+export interface StreamFinishInfo {
+  /** complete-event / answer-done / server-closed / idle-timeout / error / aborted / cancelled-by-user / not-configured */
+  reason: string;
+  /** 是否收到过答案内容 */
+  sawAnswer: boolean;
+  /** 是否收到过明确的终止事件（complete / answer.done）；false 说明这条流是被掐断的 */
+  sawTerminal: boolean;
+}
+
 /**
  * 调用 /agent-chat/:sessionId，按 SSE 流式产出 AgentEvent。
  *
@@ -330,9 +340,20 @@ export interface StreamHandle {
  *      所以 complete 必须留宽限期，不能立即收尾，否则错误被吞掉）
  *   2. response_type === 'complete' → 显式结束，留 600ms 宽限等随后的 error
  *   3. response_type === 'answer' && done === true → 正常结束，留 600ms 宽限
- *   4. 空闲超时（默认 25s 无数据）→ 兜底结束
+ *   4. 空闲超时（默认 180s 无数据）→ 兜底结束
  *   5. 全程没有任何答案内容也没有 error → 视为失败并回调 onError，
  *      避免用户只看到一个空白气泡
+ *
+ * ⚠️ 空闲超时为什么从 25s 放宽到 180s：
+ *    这是个 ReAct 式多轮 agent，一次提问会跑 4~5 个 iteration，而**每个 iteration
+ *    之间的 LLM 调用期间 SSE 是完全静默的**。真机实测到 73~74 秒的静默间隔。
+ *    25s 会在这种完全正常的回合里中途 abort —— 用户看到「正在搜索」，然后答案
+ *    只有开头几十个字，而且因为已经收到过答案内容（sawAnswer=true），连错误提示
+ *    都不会显示，完全无从判断发生了什么。
+ *
+ *    真正的断线不会走这条路：fetch 自己会抛错并进入 catch 分支立即结束。
+ *    所以这个兜底值只需要覆盖「连接还开着、但服务端迟迟没有数据」的情况，
+ *    给足余量即可。
  */
 export function agentChatStream(
   sessionId: string,
@@ -342,7 +363,7 @@ export function agentChatStream(
     webSearchEnabled?: boolean;
     knowledgeBaseIds?: string[];
     idleTimeoutMs?: number;
-    onFinish?: () => void;
+    onFinish?: (info: StreamFinishInfo) => void;
     onAssistantMessageId?: (id: string) => void;
   } = {},
   onEvent: (e: AgentEvent) => void,
@@ -350,7 +371,7 @@ export function agentChatStream(
 ): StreamHandle {
   const ctrl = new AbortController();
   const { baseUrl, apiKey } = loadSettings();
-  const idleTimeoutMs = opts.idleTimeoutMs ?? 25000;
+  const idleTimeoutMs = opts.idleTimeoutMs ?? 180000;
 
   let finished = false;
   let idleTimer: any = null;
@@ -358,6 +379,18 @@ export function agentChatStream(
   // 是否收到过「有效答案」和「明确错误」——用来兜底判断本次是否其实是失败
   let sawAnswer = false;
   let sawError = false;
+  // 是否收到过明确的终止事件。false 说明这条流是被掐断的（超时/断线），
+  // 服务端可能仍在生成 —— 调用方据此决定要不要去服务端把完整答案捞回来。
+  let sawTerminal = false;
+  // 是否已经把「真实错误」报出去了。
+  // ⚠️ 报过之后就不能再让下面那句通用兜底文案覆盖它 —— 否则用户看到的永远是
+  //    「服务端没有返回任何内容」，而真凶（例如 `TypeError: Failed to fetch`，
+  //    表示请求在连接层就失败、根本没到服务端）被吞掉，完全无法排查。
+  let errorReported = false;
+  const reportError = (err: Error) => {
+    errorReported = true;
+    onError?.(err);
+  };
 
   const finish = (reason: string) => {
     if (finished) return;
@@ -371,14 +404,14 @@ export function agentChatStream(
     //    否则用户只会看到一个空白气泡，完全不知道发生了什么。
     //    排除用户主动取消（那是预期行为，不该弹错误）。
     const userCancelled = reason === 'cancelled-by-user' || reason === 'not-configured';
-    if (!sawAnswer && !sawError && !userCancelled) {
-      onError?.(new Error(
+    if (!sawAnswer && !sawError && !userCancelled && !errorReported) {
+      reportError(new Error(
         reason === 'idle-timeout'
           ? '服务端长时间没有返回内容，已超时中止。请重试。'
           : '服务端没有返回任何内容（通常是模型额度不足或后端异常），请稍后重试。'
       ));
     }
-    opts.onFinish?.();
+    opts.onFinish?.({ reason, sawAnswer, sawTerminal });
   };
 
   const resetIdle = () => {
@@ -391,7 +424,7 @@ export function agentChatStream(
 
   const run = async () => {
     if (!baseUrl || !apiKey) {
-      onError?.(new Error('未配置 WeKnora baseUrl / apiKey'));
+      reportError(new Error('未配置 WeKnora baseUrl / apiKey'));
       finish('not-configured');
       return;
     }
@@ -481,12 +514,14 @@ export function agentChatStream(
             }
             // 2) complete：留 600ms 宽限，等可能紧跟其后的 error
             if (rtype === 'complete' || eventType === 'complete') {
+              sawTerminal = true;
               clearTimeout(graceTimer);
               graceTimer = setTimeout(() => finish('complete-event'), 600);
               continue;
             }
             // 3) answer 的最后一帧（done=true）→ 留 600ms 宽限期收尾
             if (rtype === 'answer' && payload.done === true) {
+              sawTerminal = true;
               clearTimeout(graceTimer);
               graceTimer = setTimeout(() => finish('answer-done'), 600);
             }
@@ -503,7 +538,8 @@ export function agentChatStream(
         return;
       }
       console.error('[weknora] stream error:', e);
-      onError?.(e);
+      // 先报真实错误；finish() 里的通用兜底会因为「已报过」而跳过，不再覆盖它
+      reportError(e);
       finish('error');
     }
   };

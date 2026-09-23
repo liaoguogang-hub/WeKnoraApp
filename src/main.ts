@@ -19,7 +19,8 @@ import './components/settings-page';
 import './components/agents-page';
 import './components/knowledge-page';
 import './components/agent-selector';
-import { isConfigured, createSession } from './lib/weknora-client';
+import { isConfigured, createSession, loadSettings } from './lib/weknora-client';
+import { bindAgent } from './lib/session-agent';
 import { loadTheme, applyTheme } from './lib/theme';
 
 type Page = 'chat' | 'agents' | 'kb' | 'settings';
@@ -159,6 +160,15 @@ export class LlApp extends LitElement {
       this.configured = isConfigured();
       if (this.configured) this.openPage('chat');
     });
+    // 页面切换统一在 app 这一层接收。
+    // ⚠️ 之前 @open-page 只挂在 <ll-sidebar> 上，于是从顶栏 Agent 选择器
+    //    （ll-agent-selector，不在 sidebar 子树里）派发的 open-page
+    //    冒泡到 ll-app 就没人接了 —— 那个「管理所有 Agent」点了没反应。
+    //    挂在 ll-app 上能接住任何后代派发上来的 open-page。
+    this.addEventListener('open-page', ((e: CustomEvent) => {
+      const p = e.detail?.page as Page | undefined;
+      if (p) this.openPage(p);
+    }) as EventListener);
     // ✅ 恢复上次会话（不再每次启动都新建）
     if (this.configured) {
       this.restoreLastSession();
@@ -291,6 +301,8 @@ export class LlApp extends LitElement {
     try {
       const s = await createSession(null);
       if (s?.id && this.page === 'chat' && !this.sessionId) {
+        // 新会话绑定当前默认 Agent —— 后端不保存这个绑定，只能记在本地
+        bindAgent(s.id, loadSettings().defaultAgentId || '');
         this.sessionId = s.id;
         this.rememberSession(s.id);
       }
@@ -320,7 +332,10 @@ export class LlApp extends LitElement {
   private async handleNewChat() {
     try {
       const s = await createSession(null);
-      if (s?.id) this.handleOpenChat(new CustomEvent('open-chat', { detail: { sessionId: s.id } }));
+      if (s?.id) {
+        bindAgent(s.id, loadSettings().defaultAgentId || '');
+        this.handleOpenChat(new CustomEvent('open-chat', { detail: { sessionId: s.id } }));
+      }
     } catch (e) {
       console.warn('[app] new chat failed:', e);
     }
@@ -333,8 +348,8 @@ export class LlApp extends LitElement {
         <button class="menu-btn" @click=${() => this.toggleDrawer()}>☰</button>
         ${title ? html`<div class="topbar-title">${title}</div>` : html`<div class="topbar-title"></div>`}
         <div class="topbar-actions">
-          ${!this.sessionId && this.page === 'chat' ? html`
-            <ll-agent-selector></ll-agent-selector>
+          ${this.page === 'chat' ? html`
+            <ll-agent-selector .sessionId=${this.sessionId || ''}></ll-agent-selector>
           ` : nothing}
           ${!this.sessionId && this.page !== 'chat' ? html`
             <button class="icon-btn" @click=${() => this.openPage('chat')} title="返回 Chat">✕</button>
@@ -361,7 +376,6 @@ export class LlApp extends LitElement {
         <ll-sidebar
           .open=${this.drawerOpen}
           @open-chat=${(e: CustomEvent) => this.handleOpenChat(e)}
-          @open-page=${(e: CustomEvent) => this.openPage(e.detail.page)}
         ></ll-sidebar>
       </div>
     `;

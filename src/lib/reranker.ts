@@ -55,6 +55,16 @@ const RERANK_WEIGHTS = {
 interface CacheEntry {
   results: RerankCandidate[];
   ts: number;
+  /**
+   * 产生这条缓存时用的是哪一档。
+   *
+   * ⚠️ 必须存：命中缓存时如果硬编码成某个档位，界面会**报错档位**。
+   *    原先命中就写死 level: 'bm25-rescore'，于是「神经网络精排」的结果
+   *    第二次问同一个问题时会显示成「关键词精排(BM25)」—— 用户看到的是假信息。
+   */
+  level: RerankStats['level'];
+  /** 原始耗时，命中缓存时展示它（而不是缓存查找的 0.1ms） */
+  durationMs: number;
 }
 
 const CACHE_MAX_SIZE = 100;
@@ -84,7 +94,7 @@ class LRUCache {
     return this.hash(query + '||' + resultSig + '||' + optsSig);
   }
 
-  get(key: string): RerankCandidate[] | null {
+  get(key: string): CacheEntry | null {
     const entry = this.map.get(key);
     if (!entry) {
       this.stats.misses++;
@@ -98,12 +108,12 @@ class LRUCache {
     this.map.delete(key);
     this.map.set(key, entry);
     this.stats.hits++;
-    return entry.results;
+    return entry;
   }
 
-  set(key: string, results: RerankCandidate[]): void {
+  set(key: string, results: RerankCandidate[], level: RerankStats['level'], durationMs: number): void {
     if (this.map.has(key)) this.map.delete(key);
-    this.map.set(key, { results, ts: Date.now() });
+    this.map.set(key, { results, ts: Date.now(), level, durationMs });
     while (this.map.size > CACHE_MAX_SIZE) {
       const firstKey = this.map.keys().next().value;
       if (!firstKey) break;
@@ -136,53 +146,134 @@ export function clearRerankCache() {
   _cache.clear();
 }
 
+/**
+ * 端侧模型与 ONNX Runtime wasm 的本地路径。
+ *
+ * 两者都随 APK 内置（源在 vite 的 public/ 下，由 scripts/fetch-model.mjs 补齐），
+ * WebView 从 http://localhost/… 同源加载 —— 不涉及 CORS，且全程不需要网络。
+ *
+ * 为什么必须内置、而不能只配个镜像：
+ *   真机实测 huggingface.co 不可达（8s 超时）；hf-mirror.com 虽然可达，但浏览器
+ *   发起的 CORS 请求拿到的是缺 `Access-Control-Allow-Origin` 的响应，直接被拦掉，
+ *   而 transformers.js 没有可替换 fetch 的钩子，绕不过去。
+ */
+export const LOCAL_MODEL_PATH = '/models/';
+export const ORT_WASM_PATH = '/ort/';
+
 // === Level 1: Cross-encoder（懒加载 @xenova/transformers） ===
 
+/**
+ * 返回 **原始 logit**（不是概率）。
+ *
+ * ⚠️ 必须绕开 transformers.js 的 `text-classification` pipeline：
+ *    ms-marco 系列是 num_labels=1 的回归模型（config 里 id2label 只有 LABEL_0），
+ *    而该 pipeline 对「单标签」不做特判，走的是
+ *        problem_type === 'multi_label_classification' ? sigmoid : softmax
+ *    分支 —— 对长度为 1 的向量做 softmax 恒等于 1.0。
+ *    结果是所有候选分数完全相同、排序退化成空操作（看起来「跑了」其实没作用）。
+ *    所以这里直接用 AutoTokenizer + AutoModelForSequenceClassification 取 logits。
+ */
 type CrossEncoderFn = (
   query: string,
   docs: string[],
   options?: { topk?: number }
 ) => Promise<Array<{ score: number; index: number }>>;
 
+const CE_MODEL_ID = 'Xenova/ms-marco-MiniLM-L-6-v2';
+
+/** logit → 0..1 相关性（仅用于展示，且与 logit 单调，不影响排序） */
+function sigmoid(x: number): number {
+  return 1 / (1 + Math.exp(-x));
+}
+
 let _crossEncoderPromise: Promise<CrossEncoderFn | null> | null = null;
+
+/** cross-encoder 的真实状态 —— 供 UI 显示「到底有没有真的跑起来」 */
+export type CrossEncoderState = 'idle' | 'loading' | 'ready' | 'failed';
+let _ceState: CrossEncoderState = 'idle';
+let _ceError = '';
+
+export function getCrossEncoderState(): { state: CrossEncoderState; error: string } {
+  return { state: _ceState, error: _ceError };
+}
 
 async function loadCrossEncoder(): Promise<CrossEncoderFn | null> {
   if (_crossEncoderPromise) return _crossEncoderPromise;
 
+  _ceState = 'loading';
   _crossEncoderPromise = (async () => {
     try {
       const tf = await import('@xenova/transformers').catch(() => null);
       if (!tf) {
         console.warn('[reranker] @xenova/transformers not available');
+        _ceState = 'failed';
+        _ceError = 'transformers 运行时不可用';
         return null;
       }
-      const { pipeline, env } = tf as any;
+      const { env, AutoTokenizer, AutoModelForSequenceClassification } = tf as any;
+      // 模型走内置资源：localPath = localModelPath + repo_id + 文件名（无 resolve/main 段）
       env.allowLocalModels = true;
-      env.useFS = undefined;
+      env.localModelPath = LOCAL_MODEL_PATH;
+      env.allowRemoteModels = false;
+      env.useFS = false;
+      // ⚠️ 坑：ort 的 wasmPaths 默认指向 jsdelivr CDN
+      //    （见 @xenova/transformers src/env.js）。不改成内置目录的话，
+      //    即使模型已经打进 APK，ONNX Runtime 仍会去网上拉 wasm。
+      const ortWasm = (env as any)?.backends?.onnx?.wasm;
+      if (ortWasm) {
+        ortWasm.wasmPaths = ORT_WASM_PATH;
+        ortWasm.numThreads = 1;   // WebView 没有 SharedArrayBuffer，多线程必然失败
+        ortWasm.simd = true;
+      }
 
-      const pipe: any = await pipeline(
-        'text-classification',
-        'Xenova/ms-marco-MiniLM-L-6-v2',
-        { quantized: true }
+      const tokenizer = await AutoTokenizer.from_pretrained(CE_MODEL_ID);
+      const model = await AutoModelForSequenceClassification.from_pretrained(
+        CE_MODEL_ID,
+        { quantized: true }   // 对应内置的 onnx/model_quantized.onnx
       );
-      console.log('[reranker] cross-encoder loaded');
+      _ceState = 'ready';
+      console.log('[reranker] cross-encoder loaded (raw logits)');
+
       return async (query: string, docs: string[], options) => {
-        const inputs = docs.map((d) => `${query} [SEP] ${d.slice(0, 512)}`);
-        const outputs = await pipe(inputs, { topk: 1 });
-        const scored = outputs.map((out: any, idx: number) => {
-          const score = Array.isArray(out) ? (out[0]?.score ?? 0) : (out?.score ?? 0);
-          return { score, index: idx };
-        });
-        scored.sort((a: any, b: any) => b.score - a.score);
+        // 用 text_pair 组「问题 / 文档」对，tokenizer 会正确生成 token_type_ids。
+        // 旧实现把 "[SEP]" 当普通文本拼进去（`${query} [SEP] ${doc}`），
+        // token_type_ids 会全是 0 —— 而 cross-encoder 正是靠它区分问题与文档。
+        const inputs = tokenizer(
+          docs.map(() => query),
+          { text_pair: docs, padding: true, truncation: true }
+        );
+        const { logits } = await model(inputs);
+        const data: Float32Array = logits.data;
+        const dims: number[] = logits.dims;
+        const rows = dims[0];
+        const stride = dims.length > 1 ? dims[dims.length - 1] : 1;
+        const scored: Array<{ score: number; index: number }> = [];
+        for (let i = 0; i < rows; i++) {
+          scored.push({ score: data[i * stride], index: i });
+        }
+        scored.sort((a, b) => b.score - a.score);
         return options?.topk ? scored.slice(0, options.topk) : scored;
       };
     } catch (e) {
+      _ceState = 'failed';
+      _ceError = (e as Error)?.message || String(e);
       console.warn('[reranker] cross-encoder load failed, will use Level 2:', e);
       return null;
     }
   })();
 
   return _crossEncoderPromise;
+}
+
+/**
+ * 预热模型（首次约 20+MB，走 hf-mirror）。永不抛出，返回是否真的就绪。
+ *
+ * 为什么需要它：rerank() 内部把「下载模型」和「推理」一起压在 timeoutMs 里，
+ * 第一次必然撞超时 → 退化成 BM25。预热把下载和精排解耦。
+ */
+export async function preloadCrossEncoder(): Promise<boolean> {
+  const ce = await loadCrossEncoder();
+  return !!ce;
 }
 
 // === Level 2: BM25 重打分（零依赖，中英文） ===
@@ -280,12 +371,13 @@ export async function rerank(
     const cached = _cache.get(cacheKey);
     if (cached) {
       return {
-        results: cached,
+        results: cached.results,
         stats: {
-          level: 'bm25-rescore', // 缓存命中不区分级别
-          durationMs: Math.round(performance.now() - start),
+          // 用当初产生这条缓存时的真实档位 —— 不能写死，否则界面会报错档位
+          level: cached.level,
+          durationMs: cached.durationMs,
           inputCount: results.length,
-          outputCount: cached.length,
+          outputCount: cached.results.length,
           timedOut: false,
           cacheHit: true,
         },
@@ -308,11 +400,19 @@ export async function rerank(
         ]);
         const out: RerankCandidate[] = [];
         for (const s of scored) {
-          out.push({ ...results[s.index], score: s.score });
+          // CE 给的是 logit，转成 0..1 的相关性再展示
+          out.push({ ...results[s.index], score: sigmoid(s.score) });
         }
-        const finalResults = normalize ? normalizeScores(out, out.map((r) => r.score)) : out;
+        // ⚠️ 这里刻意不做 max 归一化：CE 已经是绝对的相关性概率，
+        //    归一化会把最高分强行拉成 1.00，反而丢掉「到底相不相关」这个信息
+        const finalResults = out;
         if (!opts.skipCache) {
-          _cache.set(_cache.makeKey(query, results, opts), finalResults);
+          _cache.set(
+            _cache.makeKey(query, results, opts),
+            finalResults,
+            'cross-encoder',
+            Math.round(performance.now() - start)
+          );
         }
         return {
           results: finalResults,
@@ -340,7 +440,12 @@ export async function rerank(
       ? normalizeScores(sliced, sliced.map((_, i) => indexed[i].s))
       : sliced;
     if (!opts.skipCache) {
-      _cache.set(_cache.makeKey(query, results, opts), finalResults);
+      _cache.set(
+        _cache.makeKey(query, results, opts),
+        finalResults,
+        'bm25-rescore',
+        Math.round(performance.now() - start)
+      );
     }
     return {
       results: finalResults,

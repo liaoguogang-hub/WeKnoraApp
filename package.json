@@ -1,14 +1,16 @@
 {
   "name": "weknora-app",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "WeKnora Android client (Capacitor + Lit + TypeScript)",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "fetch-model": "node scripts/fetch-model.mjs",
+    "build": "node scripts/fetch-model.mjs && tsc && vite build",
     "preview": "vite preview --port 4173",
     "typecheck": "tsc --noEmit",
+    "verify:rerank": "node scripts/verify-rerank.mjs",
     "sync": "npm run build && cap sync android",
     "android:open": "cap open android",
     "android:apk": "npm run sync && cd android && ./gradlew assembleDebug",

@@ -1,22 +1,31 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  网络安全配置:允许 cleartext 到内网白名单 + HTTPS 到任意域(包括 minimaxi.com)
-  修复 Capacitor WebView 的 "Failed to fetch" 错
+  网络安全配置（Android network security config）
+
+  ⚠️ 本文件存在时，manifest 里的 android:usesCleartextTraffic="true" 会被**覆盖**：
+     network-security-config 的优先级高于该属性。
+
+  ⚠️ 之前的写法是「内网白名单 + base-config 禁止 cleartext」：
+         <base-config cleartextTrafficPermitted="false">
+         <domain-config cleartextTrafficPermitted="true"> ...白名单... </domain-config>
+     这会拦掉**所有不在白名单里的 http 地址**，其中包括本 App 实际在用的
+     http://www.leoliao.cc.cd:8088 —— 表现为**立即失败（实测 8ms）**的
+     "Failed to fetch"。典型特征：http 全挂、https 正常、http://localhost 正常。
+
+  ⚠️ 顺带一提，白名单写法本身也表达不了原意：
+     <domain> 只接受**主机名**，不支持网段。写 192.168.0.0 只会匹配字面量
+     主机 "192.168.0.0"，并不代表 192.168.0.0/24 整个网段。所以「放行任意内网
+     地址」这个需求用 <domain> 是实现不出来的。
+
+  为什么这里必须全局允许 cleartext：
+     本 App 是**自托管客户端**，baseUrl 由用户在设置页自己填 ——
+     既可能是公网 http 域名（如 http://www.leoliao.cc.cd:8088），
+     也可能是任意内网 IP:端口（README 里的示例就是 http://192.168.50.201:9080）。
+     地址无法预先枚举 ⇒ 只能允许 cleartext。
+     HTTPS 不受影响，仍然照常可用（trust-anchors 保持系统证书）。
 -->
 <network-security-config>
-    <!-- 1. 内网 cleartext(自托管 WeKnora + 模拟器宿主) -->
-    <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="true">localhost</domain>
-        <domain includeSubdomains="true">127.0.0.1</domain>
-        <domain includeSubdomains="true">10.0.2.2</domain>
-        <domain includeSubdomains="true">192.168.0.0</domain>
-        <domain includeSubdomains="true">192.168.1.0</domain>
-        <domain includeSubdomains="true">192.168.31.0</domain>
-        <domain includeSubdomains="true">10.0.0.0</domain>
-    </domain-config>
-
-    <!-- 2. HTTPS 默认允许(API.minimaxi.com / DeepSeek / OpenAI 等) -->
-    <base-config cleartextTrafficPermitted="false">
+    <base-config cleartextTrafficPermitted="true">
         <trust-anchors>
             <certificates src="system" />
         </trust-anchors>

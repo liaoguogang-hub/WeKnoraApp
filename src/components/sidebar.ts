@@ -6,9 +6,10 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, state, property } from 'lit/decorators.js';
 import {
-  listSessions, createSession, deleteSession, pinSession,
-  type Session,
+  listSessions, createSession, deleteSession, pinSession, listAgents, loadSettings,
+  type Session, type Agent,
 } from '../lib/weknora-client';
+import { bindAgent, unbindAgent, resolveAgentForSession } from '../lib/session-agent';
 
 @customElement('ll-sidebar')
 export class LlSidebar extends LitElement {
@@ -171,10 +172,26 @@ export class LlSidebar extends LitElement {
   @state() private activeId = '';
   @state() private loading = false;
   @state() private error = '';
+  /** 只用于在会话列表里显示「这个会话用的是哪个 agent」 */
+  @state() private agents: Agent[] = [];
 
   connectedCallback() {
     super.connectedCallback();
     this.refresh();
+    void this.loadAgents();
+  }
+
+  private async loadAgents() {
+    try {
+      this.agents = await listAgents();
+    } catch {
+      // 拿不到 agent 列表就只是不显示名字，不影响会话列表本身
+    }
+  }
+
+  private agentNameOf(sessionId: string): string {
+    const id = resolveAgentForSession(sessionId, loadSettings().defaultAgentId || '');
+    return this.agents.find((a) => a.id === id)?.name || '';
   }
 
   private async refresh() {
@@ -198,6 +215,8 @@ export class LlSidebar extends LitElement {
   private async handleNew() {
     try {
       const s = await createSession(null);
+      // 新会话 = 新的 agent 载体，把当前默认 Agent 绑到它身上
+      bindAgent(s.id, loadSettings().defaultAgentId || '');
       this.activeId = s.id;
       this.sessions = [s, ...this.sessions];
       this.dispatchEvent(new CustomEvent('open-chat', { detail: { sessionId: s.id } }));
@@ -217,6 +236,7 @@ export class LlSidebar extends LitElement {
     if (!confirm('删除会话？')) return;
     try {
       await deleteSession(s.id);
+      unbindAgent(s.id);
       this.sessions = this.sessions.filter((x) => x.id !== s.id);
     } catch (e) {
       this.error = (e as Error).message;
@@ -272,10 +292,10 @@ export class LlSidebar extends LitElement {
         </div>
 
         <div class="footer">
-          <button class="footer-btn" @click=${() => this.dispatchEvent(new CustomEvent('open-page', { detail: { page: 'kb' } }))}>
+          <button class="footer-btn" @click=${() => this.dispatchEvent(new CustomEvent('open-page', { detail: { page: 'kb' }, bubbles: true, composed: true }))}>
             <span>📚</span><span>知识库</span>
           </button>
-          <button class="footer-btn" @click=${() => this.dispatchEvent(new CustomEvent('open-page', { detail: { page: 'settings' } }))}>
+          <button class="footer-btn" @click=${() => this.dispatchEvent(new CustomEvent('open-page', { detail: { page: 'settings' }, bubbles: true, composed: true }))}>
             <span>⚙️</span><span>设置</span>
           </button>
         </div>
@@ -287,12 +307,13 @@ export class LlSidebar extends LitElement {
     const date = s.updated_at ? new Date(s.updated_at) : null;
     const sub = date ? `${date.getMonth() + 1}/${date.getDate()}` : '';
     const icon = s.is_pinned ? '📌' : '💬';
+    const agentName = this.agentNameOf(s.id);
     return html`
       <div class="session-item ${s.id === this.activeId ? 'active' : ''}" @click=${() => this.handleOpen(s)}>
         <div class="session-icon">${icon}</div>
         <div class="session-meta">
           <div class="session-title">${s.title || '新会话'}</div>
-          <div class="session-sub">${sub}</div>
+          <div class="session-sub">${sub}${agentName ? ` · ${agentName}` : ''}</div>
         </div>
         <div class="session-actions">
           <button class="session-action-btn ${s.is_pinned ? 'active' : ''}" @click=${(e: Event) => this.handlePin(s, e)}>📌</button>
