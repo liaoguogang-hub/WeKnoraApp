@@ -207,6 +207,23 @@ export async function pinSession(id: string): Promise<{ is_pinned: boolean }> {
   return unwrap(resp) ?? { is_pinned: false };
 }
 
+/**
+ * 取消置顶。
+ *
+ * ⚠️ 不能用「再调一次 POST /sessions/{id}/pin」来取消 —— 实测该接口是
+ *    **幂等置顶**：连调两次都返回 `{is_pinned:true}`，会话始终处于置顶状态，
+ *    这正是「会话置顶后无法取消置顶」的根因。
+ *
+ *    取消置顶要走 **DELETE**（实测 `DELETE /sessions/{id}/pin` 返回
+ *    `{is_pinned:false}`，会话确实变回未置顶）。
+ *    另外 `PUT /sessions/{id}` 带 `is_pinned:false` 返回 200 但**字段被忽略**，
+ *    也不能用来取消。
+ */
+export async function unpinSession(id: string): Promise<{ is_pinned: boolean }> {
+  const resp = await api<any>(`/sessions/${id}/pin`, { method: 'DELETE' });
+  return unwrap(resp) ?? { is_pinned: false };
+}
+
 export async function stopGeneration(sessionId: string, messageId: string): Promise<void> {
   await api(`/sessions/${sessionId}/stop`, {
     method: 'POST',

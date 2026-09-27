@@ -6,7 +6,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state, property } from 'lit/decorators.js';
 import {
-  listSessions, createSession, deleteSession, pinSession, listAgents, loadSettings,
+  listSessions, createSession, deleteSession, pinSession, unpinSession, listAgents, loadSettings,
   type Session, type Agent,
 } from '../lib/weknora-client';
 import { bindAgent, unbindAgent, resolveAgentForSession } from '../lib/session-agent';
@@ -270,14 +270,32 @@ export class LlSidebar extends LitElement {
     }
   }
 
+  /**
+   * 置顶 / 取消置顶（同一个按钮）。
+   *
+   * ⚠️ 不能无论状态都调 `POST /sessions/{id}/pin` —— 实测它是**幂等置顶**：
+   *    连调两次都返回 `{is_pinned:true}`，所以一旦置顶就再也取消不掉。
+   *    取消必须走 `DELETE /sessions/{id}/pin`（见 unpinSession 的注释）。
+   *
+   * 这里按当前状态分派，并先做乐观更新（失败回滚），点一下立刻有反馈。
+   */
   private async handlePin(s: Session, ev: Event) {
     ev.stopPropagation();
+    const wasPinned = s.is_pinned;
+    // 乐观更新：先按本地状态翻转，界面立刻响应
+    this.sessions = this.sessions.map((x) =>
+      x.id === s.id ? { ...x, is_pinned: !wasPinned } : x
+    );
     try {
-      const r = await pinSession(s.id);
+      const r = wasPinned ? await unpinSession(s.id) : await pinSession(s.id);
       this.sessions = this.sessions.map((x) =>
         x.id === s.id ? { ...x, is_pinned: r.is_pinned } : x
       );
     } catch (e) {
+      // 失败则回滚到原状态，并显示原因
+      this.sessions = this.sessions.map((x) =>
+        x.id === s.id ? { ...x, is_pinned: wasPinned } : x
+      );
       this.error = (e as Error).message;
     }
   }
@@ -343,7 +361,11 @@ export class LlSidebar extends LitElement {
           <div class="session-sub">${sub}${agentName ? ` · ${agentName}` : ''}</div>
         </div>
         <div class="session-actions">
-          <button class="session-action-btn ${s.is_pinned ? 'active' : ''}" @click=${(e: Event) => this.handlePin(s, e)}>📌</button>
+          <button
+            class="session-action-btn ${s.is_pinned ? 'active' : ''}"
+            title=${s.is_pinned ? '取消置顶' : '置顶'}
+            @click=${(e: Event) => this.handlePin(s, e)}
+          >📌</button>
           <button class="session-action-btn" @click=${(e: Event) => this.handleDelete(s, e)}>🗑</button>
         </div>
       </div>

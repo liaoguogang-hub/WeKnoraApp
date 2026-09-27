@@ -120,6 +120,8 @@ export class LlChatPage extends LitElement {
   @state() private ceState: 'idle' | 'loading' | 'ready' | 'failed' = getCrossEncoderState().state;
   private _assistantMessageId = '';
   @state() private toast = '';
+  /** 刚复制过的气泡 id —— 把复制按钮短暂显示成「✓ 已复制」 */
+  @state() private copiedKey = '';
 
   private saveRerankPref() {
     localStorage.setItem(RERANK_KEY, JSON.stringify(this.rerankPref));
@@ -691,6 +693,77 @@ export class LlChatPage extends LitElement {
     `)}`;
   }
 
+  /**
+   * 一键复制整条回答。
+   *
+   * 优先用 Clipboard API（WebView 里 http://localhost 属安全上下文，可用）；
+   * 它不可用或被拒时回退到隐藏 textarea + execCommand，保证老 WebView 也能复制。
+   * 复制成功才把按钮切成「✓ 已复制」，失败会在顶部错误条显示原因。
+   */
+  private async copyBubble(b: UiBubble) {
+    const text = b.content || '';
+    if (!text) return;
+    const ok = await this.writeClipboard(text);
+    if (!ok) {
+      this.error = '复制失败：系统拒绝了剪贴板访问（可长按回答手动选择文本）';
+      return;
+    }
+    const key = b.id;
+    this.copiedKey = key;
+    setTimeout(() => { if (this.copiedKey === key) this.copiedKey = ''; }, 1800);
+  }
+
+  /**
+   * 把文本写进剪贴板。两段式，返回是否成功。
+   *
+   * ⚠️ Android WebView 默认**不授予**异步 Clipboard API 权限：真机实测
+   *    `navigator.clipboard.writeText()` 直接抛 `Write permission denied.`
+   *    （即使是在真实触摸手势里也一样 —— 它需要原生侧 WebChromeClient
+   *    的 onPermissionRequest 放行 RESOURCE_CLIPBOARD_WRITE）。
+   *
+   *    所以不能只在「clipboard 对象不存在」时才回退 —— 它存在但会被拒。
+   *    这里改成：先试 Clipboard API，**抛错也继续走 execCommand 回退**。
+   *    execCommand('copy') 在 WebView 里由用户手势触发时通常可用。
+   */
+  private async writeClipboard(text: string): Promise<boolean> {
+    // ① 现代 Clipboard API
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch {
+      // 被拒 / 非安全上下文 → 落到 ②
+    }
+    // ② 回退：隐藏 textarea + execCommand
+    //    注意不能用 display:none（那样选不中），用 1px + opacity:0 且保持可聚焦。
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.top = '0';
+      ta.style.left = '0';
+      ta.style.width = '1px';
+      ta.style.height = '1px';
+      ta.style.padding = '0';
+      ta.style.border = 'none';
+      ta.style.outline = 'none';
+      ta.style.boxShadow = 'none';
+      ta.style.background = 'transparent';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      ta.setSelectionRange(0, text.length);
+      const done = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return done;
+    } catch {
+      return false;
+    }
+  }
+
   private renderBubble(b: UiBubble) {
     if (b.role === 'user') {
       // 用户消息按段渲染（保留换行结构）
@@ -707,6 +780,15 @@ export class LlChatPage extends LitElement {
         ${(b.content || b.streaming)
           ? html`<div class="bubble assistant">${this.renderParagraphs(b.content, b.streaming)}</div>`
           : nothing}
+        ${b.content && !b.streaming ? html`
+          <div class="bubble-tools">
+            <button
+              class="copy-btn ${this.copiedKey === b.id ? 'copied' : ''}"
+              title="复制这条回答的全文"
+              @click=${() => this.copyBubble(b)}
+            >${this.copiedKey === b.id ? '✓ 已复制' : '📋 复制'}</button>
+          </div>
+        ` : nothing}
         ${b.truncated ? html`
           <div class="bubble system">⚠️ 流式连接中断，回答可能不完整${b.reconciling ? ' —— 正在从服务端取回完整内容…' : ''}</div>
         ` : nothing}

@@ -1275,3 +1275,33 @@ ll-sidebar .section-toggle .count { margin-left: auto; font-weight: 500; opacity
   font-size: 10px; padding: 2px 8px; border-radius: var(--r-full);
   background: var(--accent); color: var(--accent-fg); font-weight: 600;
 }
+
+/* ===== 回答气泡下的「一键复制」===== */
+.bubble-tools {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin-top: 2px;
+}
+.copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 12px;
+  border-radius: var(--r-full);
+  background: transparent;
+  color: var(--dim);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: all 0.15s var(--ease-quick);
+  -webkit-tap-highlight-color: transparent;
+}
+.copy-btn:hover { background: var(--bg-2); color: var(--fg); border-color: var(--fg-2); }
+.copy-btn:active { transform: scale(0.96); }
+.copy-btn.copied {
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 45%, transparent);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+}

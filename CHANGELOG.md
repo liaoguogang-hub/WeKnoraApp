@@ -3,6 +3,29 @@
 本文件记录 WeKnoraApp 的所有重要变更。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.2] — 2026-09-24
+
+### 修复
+
+- **会话置顶后无法取消置顶（关键）**。根因在后端的接口语义：`POST /api/v1/sessions/{id}/pin`
+  是**幂等置顶**，实测连调两次都返回 `{is_pinned:true}`，会话始终处于置顶状态。
+  而 App 无论当前是否已置顶都只调这一个接口，所以**一旦置顶就再也取消不掉**。
+
+  取消置顶必须走 **`DELETE /api/v1/sessions/{id}/pin`**（实测返回
+  `{is_pinned:false}`，会话确实变回未置顶）。
+
+  顺带排除掉的写法：`PUT /sessions/{id}` 带 `is_pinned:false` 返回 200 但字段被**忽略**；
+  `PATCH` 该路径直接 404。
+
+  现在 `src/lib/weknora-client.ts` 增加 `unpinSession()`（走 DELETE）；侧边栏按当前
+  状态分派「置顶 / 取消置顶」，并做乐观更新（失败回滚），按钮 tooltip 也随状态变化。
+
+### 新增
+
+- **回答一键复制**。每条 assistant 回答下方增加「📋 复制」按钮，复制成功后短暂变为
+  「✓ 已复制」（1.8 秒）。优先使用 Clipboard API；不可用或被拒时回退到隐藏
+  textarea + `document.execCommand('copy')`，保证老 WebView 也能复制。
+
 ## [0.3.1] — 2026-09-23
 
 ### 新增
