@@ -22,6 +22,10 @@ android/**/build/
 *.p12
 google-services.json
 android/app/google-services.json
+# release 签名凭据（storeFile / storePassword / keyAlias / keyPassword）。
+# 缺失时 gradlew assembleRelease 会退回未签名产物，构建不会失败。
+keystore.properties
+android/keystore.properties
 
 # ---- IDE ----
 .idea/
