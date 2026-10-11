@@ -21,7 +21,10 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 
 /**
  * WeKnora 本地原生插件 —— 补齐 WebView 做不到的能力：
@@ -164,6 +167,181 @@ public class FileToolsPlugin extends Plugin {
             call.resolve(ret);
         } catch (Exception e) {
             call.reject("保存失败: " + e.getMessage());
+        }
+    }
+
+    // ============ 1b) 原生流式下载到公共下载目录 ============
+
+    /**
+     * 参数：url、apiKey（作为 X-API-Key 头）、fileName、mimeType（可选）
+     * 返回：uri / path / fileName / size
+     *
+     * 为什么需要它：把整个文件转 base64 再经 Capacitor 桥交给原生，数据会放大
+     * 约 1.33 倍，而且同一份内容同时存在于 JS 堆、桥接字符串和 native 堆里。
+     * NAS 知识库里有 30MB+ 的 PDF/epub，那条路会 OOM 或长时间卡死。
+     * 这里改成原生流式落盘：内存占用固定为 64KB 缓冲区，并且能回报进度。
+     *
+     * 插件方法默认在主线程执行，直接做网络 I/O 会抛 NetworkOnMainThreadException，
+     * 所以整段丢给 Bridge 的后台线程池。
+     */
+    @PluginMethod
+    public void downloadToDownloads(final PluginCall call) {
+        final String url = call.getString("url");
+        final String fileName = call.getString("fileName");
+        final String apiKey = call.getString("apiKey");
+        if (url == null || url.isEmpty() || fileName == null || fileName.isEmpty()) {
+            call.reject("url 和 fileName 必填");
+            return;
+        }
+        String mimeIn = call.getString("mimeType");
+        final String mime = (mimeIn == null || mimeIn.isEmpty()) ? guessMime(fileName) : mimeIn;
+
+        getBridge().execute(new Runnable() {
+            @Override
+            public void run() {
+                HttpURLConnection conn = null;
+                InputStream in = null;
+                OutputStream os = null;
+                Uri savedUri = null;
+                File legacyFile = null;
+                boolean created = false;
+                try {
+                    conn = (HttpURLConnection) new URL(url).openConnection();
+                    conn.setRequestMethod("GET");
+                    conn.setConnectTimeout(15000);
+                    conn.setReadTimeout(120000);
+                    conn.setInstanceFollowRedirects(true);
+                    conn.setRequestProperty("Accept", "*/*");
+                    if (apiKey != null && !apiKey.isEmpty()) {
+                        conn.setRequestProperty("X-API-Key", apiKey);
+                    }
+
+                    int code = conn.getResponseCode();
+                    if (code < 200 || code >= 300) {
+                        String detail = readErrorStream(conn);
+                        call.reject("服务端返回 HTTP " + code + (detail.isEmpty() ? "" : "：" + detail));
+                        return;
+                    }
+                    final long total = conn.getContentLengthLong();
+                    in = conn.getInputStream();
+
+                    ContentResolver resolver = getContext().getContentResolver();
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        ContentValues values = new ContentValues();
+                        values.put(MediaStore.Downloads.DISPLAY_NAME, fileName);
+                        values.put(MediaStore.Downloads.MIME_TYPE, mime);
+                        values.put(MediaStore.Downloads.RELATIVE_PATH,
+                                Environment.DIRECTORY_DOWNLOADS + "/" + SUB_DIR);
+                        values.put(MediaStore.Downloads.IS_PENDING, 1);
+                        Uri collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI;
+                        try {
+                            resolver.delete(collection,
+                                    MediaStore.Downloads.DISPLAY_NAME + "=? AND " +
+                                            MediaStore.Downloads.RELATIVE_PATH + "=?",
+                                    new String[]{ fileName, Environment.DIRECTORY_DOWNLOADS + "/" + SUB_DIR });
+                        } catch (Exception ignored) {}
+                        savedUri = resolver.insert(collection, values);
+                        if (savedUri == null) {
+                            call.reject("无法在下载目录创建文件");
+                            return;
+                        }
+                        created = true;
+                        os = resolver.openOutputStream(savedUri);
+                        if (os == null) {
+                            call.reject("无法写入下载文件");
+                            return;
+                        }
+                    } else {
+                        File dir = new File(
+                                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                                SUB_DIR);
+                        if (!dir.exists() && !dir.mkdirs()) {
+                            call.reject("无法创建下载目录（Android 9 及以下需要存储权限）");
+                            return;
+                        }
+                        legacyFile = new File(dir, fileName);
+                        os = new FileOutputStream(legacyFile);
+                        savedUri = Uri.fromFile(legacyFile);
+                        created = true;
+                    }
+
+                    byte[] buf = new byte[64 * 1024];
+                    long received = 0;
+                    long lastEmit = 0;
+                    int n;
+                    while ((n = in.read(buf)) > 0) {
+                        os.write(buf, 0, n);
+                        received += n;
+                        long now = System.currentTimeMillis();
+                        if (now - lastEmit > 250) {
+                            lastEmit = now;
+                            JSObject p = new JSObject();
+                            p.put("fileName", fileName);
+                            p.put("received", received);
+                            p.put("total", total);
+                            notifyListeners("downloadProgress", p);
+                        }
+                    }
+                    os.flush();
+                    os.close();
+                    os = null;
+                    in.close();
+                    in = null;
+
+                    if (received == 0) {
+                        throw new IllegalStateException("下载内容为空（0 字节）");
+                    }
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        ContentValues done = new ContentValues();
+                        done.put(MediaStore.Downloads.IS_PENDING, 0);
+                        resolver.update(savedUri, done, null, null);
+                    }
+
+                    JSObject ret = new JSObject();
+                    ret.put("uri", savedUri.toString());
+                    ret.put("path", Environment.DIRECTORY_DOWNLOADS + "/" + SUB_DIR + "/" + fileName);
+                    ret.put("fileName", fileName);
+                    ret.put("size", received);
+                    ret.put("total", total);
+                    call.resolve(ret);
+                } catch (Exception e) {
+                    // 失败时清掉已插入的半成品，避免下载目录里留下 0 字节残file
+                    if (created) {
+                        try {
+                            if (legacyFile != null) {
+                                if (legacyFile.exists()) legacyFile.delete();
+                            } else if (savedUri != null) {
+                                getContext().getContentResolver().delete(savedUri, null, null);
+                            }
+                        } catch (Exception ignored) {}
+                    }
+                    String msg = e.getMessage();
+                    call.reject("下载失败: " + (msg == null ? e.getClass().getSimpleName() : msg));
+                } finally {
+                    try { if (os != null) os.close(); } catch (Exception ignored) {}
+                    try { if (in != null) in.close(); } catch (Exception ignored) {}
+                    if (conn != null) conn.disconnect();
+                }
+            }
+        });
+    }
+
+    /** 读取错误响应体（最多 512 字节），把服务端的真实原因带给用户 */
+    private String readErrorStream(HttpURLConnection conn) {
+        InputStream es = null;
+        try {
+            es = conn.getErrorStream();
+            if (es == null) return "";
+            byte[] buf = new byte[512];
+            int n = es.read(buf);
+            if (n <= 0) return "";
+            return new String(buf, 0, n, java.nio.charset.StandardCharsets.UTF_8)
+                    .replaceAll("\\s+", " ").trim();
+        } catch (Exception e) {
+            return "";
+        } finally {
+            try { if (es != null) es.close(); } catch (Exception ignored) {}
         }
     }
 

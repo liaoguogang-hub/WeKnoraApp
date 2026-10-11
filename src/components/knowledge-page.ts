@@ -17,7 +17,7 @@ import {
 } from '../lib/weknora-client';
 import {
   saveToDownloads, findDownloaded, openFileNative, openFileManager,
-  deleteDownloaded,
+  deleteDownloaded, downloadToDownloads, onDownloadProgress,
 } from '../lib/file-tools';
 
 const DOWNLOAD_MAP_KEY = 'weknora-downloads-v2';
@@ -52,15 +52,37 @@ export class LlKnowledgePage extends LitElement {
   @state() private dlMap: Record<string, DownloadedInfo> = {};
   /** 详情页内联提示（下载/打开结果） */
   @state() private detailMsg = '';
+  /** 原生下载进度（大文件用） */
+  @state() private dlProgress: { received: number; total: number } = { received: 0, total: 0 };
 
   private _toastTimer: any = null;
+  private _offProgress?: () => void;
 
   // ================= 生命周期 =================
 
   async connectedCallback() {
     super.connectedCallback();
     this.dlMap = this.loadDlMap();
+    // 订阅原生下载进度（大文件够久，没进度条用户会以为卡死）
+    this._offProgress = await onDownloadProgress((p) => {
+      if (!this.downloadingId) return;
+      const cur = this.detail;
+      if (cur && this.fileNameOf(cur) !== p.fileName) return;
+      this.dlProgress = { received: p.received, total: p.total };
+      if (p.total > 0) {
+        const pct = Math.floor((p.received / p.total) * 100);
+        this.detailSay(`正在下载… ${pct}%（${this.formatSize(p.received)} / ${this.formatSize(p.total)}）`);
+      } else {
+        this.detailSay(`正在下载… ${this.formatSize(p.received)}`);
+      }
+    });
     await this.refreshKBs();
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    this._offProgress?.();
+    this._offProgress = undefined;
   }
 
   // ================= 下载记录持久化 =================
@@ -217,24 +239,47 @@ export class LlKnowledgePage extends LitElement {
 
     // 4) 真正下载
     this.downloadingId = fileId;
+    this.dlProgress = { received: 0, total: 0 };
     this.detailSay('正在下载…');
     try {
       const settings = loadSettings();
       const url = `${settings.baseUrl.replace(/\/+$/, '')}/api/v1/knowledge/${fileId}/download`;
+
+      // 4a) 优先走原生流式下载：文件在 Java 侧边收边落盘，不经过 JS / base64。
+      //     旧实现把整个文件转 base64 再经桥传给原生，30MB+ 的文件会 OOM 或卡死。
+      try {
+        const saved = await downloadToDownloads(url, fileName, settings.apiKey);
+        const info: DownloadedInfo = {
+          name: fileName,
+          uri: saved.uri,
+          path: saved.path,
+          size: saved.size,
+          ts: Date.now(),
+        };
+        this.markDownloaded(fileId, info);
+        this.detailSay(`✅ 已下载到「下载/WeKnora」(${this.formatSize(saved.size)})`);
+        return info;
+      } catch (nativeErr) {
+        const msg = ((nativeErr as Error)?.message || '').trim();
+        // 浏览器/非原生环境没有这个原生方法 → 落到 Web 兜底；其余错误直接上报
+        if (msg !== 'NOT_NATIVE' && !/not implemented|not available/i.test(msg)) {
+          throw nativeErr;
+        }
+      }
+
+      // 4b) Web 兜底（浏览器调试用）：fetch → blob
       const resp = await fetch(url, { headers: { 'X-API-Key': settings.apiKey } });
       if (!resp.ok) throw new Error(`服务端返回 HTTP ${resp.status}`);
       const blob = await resp.blob();
       if (blob.size === 0) throw new Error('文件为空');
       const base64 = await this.blobToBase64(blob);
 
-      // 保存到「公共下载目录 /WeKnora」—— 系统文件管理器可见
-      const saved = await saveToDownloads(fileName, base64);
-      const info: DownloadedInfo = saved
-        ? { name: fileName, uri: saved.uri, path: saved.path, size: blob.size, ts: Date.now() }
+      const savedWeb = await saveToDownloads(fileName, base64);
+      const info: DownloadedInfo = savedWeb
+        ? { name: fileName, uri: savedWeb.uri, path: savedWeb.path, size: blob.size, ts: Date.now() }
         : { name: fileName, uri: '', path: '(WebView 下载)', size: blob.size, ts: Date.now() };
 
-      if (!saved) {
-        // Web 兜底
+      if (!savedWeb) {
         const blobUrl = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = blobUrl; a.download = fileName;
@@ -252,6 +297,7 @@ export class LlKnowledgePage extends LitElement {
     } finally {
       // 只清掉自己的状态，不影响别的文件
       if (this.downloadingId === fileId) this.downloadingId = '';
+      this.dlProgress = { received: 0, total: 0 };
     }
   }
 

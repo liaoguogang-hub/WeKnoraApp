@@ -1,7 +1,8 @@
 /**
  * 原生文件工具封装 —— 调用 Android 本地插件 FileToolsPlugin
  *
- *  - saveToDownloads   保存到「公共下载目录 /WeKnora」（系统文件管理器可见）
+ *  - downloadToDownloads 原生流式下载到「公共下载目录 /WeKnora」（推荐，大文件也能下）
+ *  - saveToDownloads   把内存里的 base64 存到公共下载目录（小文件/兜底用）
  *  - findDownloaded    检查是否已下载
  *  - openFile          用系统「打开方式」打开
  *  - openFileManager   调起系统自带文件管理器
@@ -10,7 +11,8 @@
  * 非原生环境（浏览器调试）返回失败，调用方走 Web 兜底。
  */
 
-import { registerPlugin, Capacitor } from '@capacitor/core';
+import { registerPlugin, Capacitor, type PluginListenerHandle } from '@capacitor/core';
+
 
 interface SavedFile {
   uri: string;
@@ -27,10 +29,27 @@ interface FoundFile {
 
 interface FileToolsPlugin {
   saveToDownloads(opts: { fileName: string; data: string; mimeType?: string }): Promise<SavedFile>;
+  downloadToDownloads(opts: {
+    url: string;
+    fileName: string;
+    apiKey?: string;
+    mimeType?: string;
+  }): Promise<DownloadedFile & { total?: number }>;
   findDownloaded(opts: { fileName: string }): Promise<FoundFile>;
   openFile(opts: { uri: string; mimeType?: string; title?: string }): Promise<{ opened: boolean }>;
   openFileManager(opts?: { fileName?: string; uri?: string }): Promise<{ opened: boolean; uri?: string }>;
   deleteDownloaded(opts: { uri?: string; fileName?: string }): Promise<{ deleted: boolean }>;
+  addListener(
+    eventName: 'downloadProgress',
+    cb: (data: { fileName: string; received: number; total: number }) => void,
+  ): Promise<PluginListenerHandle>;
+}
+
+export interface DownloadedFile {
+  uri: string;
+  path: string;
+  fileName: string;
+  size: number;
 }
 
 const FileTools = registerPlugin<FileToolsPlugin>('FileTools');
@@ -84,6 +103,43 @@ export async function saveToDownloads(
   } catch (e) {
     console.warn('[filetools] saveToDownloads failed:', e);
     return null;
+  }
+}
+
+/**
+ * 原生流式下载：文件在 Java 侧边收边落盘，完全不经过 JS，也不经过 base64。
+ *
+ * 与 saveToDownloads 的关键区别：这个会把失败原因**原样抛出**
+ * （例如「服务端返回 HTTP 500：{...resource not found...}」），
+ * 而不是吞掉返回 null —— 界面才能显示真实原因。
+ *
+ * 内存占用固定 64KB 缓冲，30MB+ 的文件也不会 OOM。
+ * 非原生环境抛 NOT_NATIVE，调用方据此回退到 fetch + base64 的老路。
+ */
+export async function downloadToDownloads(
+  url: string,
+  fileName: string,
+  apiKey?: string,
+): Promise<DownloadedFile> {
+  if (!isNative()) throw new Error('NOT_NATIVE');
+  return await FileTools.downloadToDownloads({
+    url,
+    fileName,
+    apiKey: apiKey || '',
+    mimeType: mimeOf(fileName),
+  });
+}
+
+/** 订阅原生下载进度，返回取消订阅的函数；非原生环境返回空操作 */
+export async function onDownloadProgress(
+  cb: (p: { fileName: string; received: number; total: number }) => void,
+): Promise<() => void> {
+  if (!isNative()) return () => {};
+  try {
+    const handle = await FileTools.addListener('downloadProgress', cb);
+    return () => { void handle.remove(); };
+  } catch {
+    return () => {};
   }
 }
 
